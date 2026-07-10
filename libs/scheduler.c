@@ -399,8 +399,16 @@ void _schedule_mlq() {
         while ((next_process = dequeue_process_from(&mlq_queues[1])) != NULL) {
             // Handle pending signals
             handle_process_signals(next_process);
-            // Break if ready to run
-            if (next_process->state == PROCESS_RUNNING) break;
+            // If ready to run
+            if (next_process->state == PROCESS_RUNNING) {
+                // Assign a time quantum of 20 ticks: background (batch/CPU-bound) processes
+                // get a longer slice than foreground ones to reduce context switches.
+                // Without this the counter stayed at 0, so after the first expiry a
+                // background process ran with a de facto quantum of a single tick
+                next_process->counter = 20;
+                // Break loop as we found a process
+                break;
+            }
         }
     }
 
