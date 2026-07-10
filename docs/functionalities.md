@@ -105,7 +105,8 @@ process. Its informations are:
 - `state` (`RUNNING`, `WAITING`...)
 - `counter`: the priority of the process in the current time
 - `priority`: it is used to calculate the counter
-- `preempt_disabled`: if `true`, the process won't be preempted
+- `sched_lock_count`: while greater than zero the process holds the scheduler 
+lock and won't be preempted
 - `pid`: the identificator
 - `stack`: the pointer
 - `flags`: the flags with which the process has been cloned from its father
@@ -142,8 +143,8 @@ The scheduler is also automatically invoked everytime the system timer ticks:
 when this happens, the CPU generates an IRQ that is handled by the 
 `handle_timer_tick` function. This function sets the current process counter to 
 -1 and invokes the `_schedule()` function to find the new process to run. This 
-operation won't be executed if the current process has disabled the preempt, so
-if the `preempt_disable` attribute of its PCB is `true`. 
+operation won't be executed if the current process holds the scheduler lock, so
+if the `sched_lock_count` attribute of its PCB is greater than zero. 
 
 ### Memory management
 

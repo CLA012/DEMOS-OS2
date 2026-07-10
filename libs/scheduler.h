@@ -76,7 +76,10 @@ struct PCB {
   long state;
   long counter;
   long priority;
-  int preempt_disabled;
+  // Scheduler lock nesting counter: while greater than 0 the timer tick will not
+  // preempt this process (critical-section guard, see sched_lock/sched_unlock).
+  // Not to be confused with the algorithm's preemption policy (is_preemptive)
+  int sched_lock_count;
   long pid;
 
   unsigned long flags;
@@ -141,8 +144,12 @@ extern struct PCB *current_process;
 extern struct PCB *processes[N_PROCESSES];
 extern int n_processes;
 
-extern void preempt_enable();
-extern void preempt_disable();
+// Critical-section guard of the scheduler: code between sched_lock() and
+// sched_unlock() cannot be preempted by the timer tick. This is a protection
+// for the scheduler's data structures, NOT the preemption policy of the
+// scheduling algorithm (which is the is_preemptive field of the descriptor)
+extern void sched_unlock();
+extern void sched_lock();
 extern void schedule();
 extern void switch_to_process(struct PCB *);
 extern void handle_timer_tick();

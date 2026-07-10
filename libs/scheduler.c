@@ -230,10 +230,17 @@ int add_process_to_scheduler(struct PCB* process) {
     return 0;
 }
 
-// Function to decrement the preemption disable counter (allows context switches again)
-void preempt_enable() { current_process->preempt_disabled--; }
-// Function to increment the preemption disable counter (prevents context switches)
-void preempt_disable() { current_process->preempt_disabled++; }
+// The scheduler lock is a critical-section guard for the scheduler and its data
+// structures: while sched_lock_count is greater than 0 the timer tick will not
+// trigger a context switch, so the locked code cannot be interrupted halfway
+// through a queue manipulation. Note that this is NOT the preemption policy of
+// the scheduling algorithm: that is expressed by the is_preemptive field of the
+// SchedAlgorithm descriptor. The counter nests: each sched_lock() must be
+// balanced by a sched_unlock()
+// Function to release the scheduler lock (allows context switches again)
+void sched_unlock() { current_process->sched_lock_count--; }
+// Function to acquire the scheduler lock (prevents context switches)
+void sched_lock() { current_process->sched_lock_count++; }
 
 // Forward declaration for the signal handling function
 void handle_process_signals(struct PCB* process);
@@ -244,8 +251,8 @@ extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 
 // Priority scheduling algorithm with an aging mechanism to prevent starvation
 void _schedule_priority_aging() {
-  // Disable preemption to ensure scheduling isn't interrupted
-  preempt_disable();
+  // Take the scheduler lock so the decision cannot be interrupted
+  sched_lock();
   // Variables to track the highest counter value and the index of the chosen process
   long max_counter, next_process_index;
 
@@ -302,8 +309,8 @@ void _schedule_priority_aging() {
     // Perform the context switch to the selected process
     switch_to_process(next_process);
   }
-  // Re-enable preemption before leaving the scheduler
-  preempt_enable();
+  // Release the scheduler lock before leaving the scheduler
+  sched_unlock();
 }
 
 // =========================================================================
@@ -312,8 +319,8 @@ void _schedule_priority_aging() {
 
 // Round Robin scheduling algorithm implementation
 void _schedule_round_robin() {
-    // Disable preemption during the scheduling decision
-    preempt_disable();
+    // Take the scheduler lock during the scheduling decision
+    sched_lock();
 
     // 1. If the current process was interrupted but is still runnable (not init)...
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
@@ -339,8 +346,8 @@ void _schedule_round_robin() {
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Re-enable preemption
-    preempt_enable();
+    // Release the scheduler lock
+    sched_unlock();
 }
 
 // Shared selection function for the non-preemptive algorithms (FCFS, SJF):
@@ -351,8 +358,8 @@ void _schedule_round_robin() {
 // This replaces the two identical _schedule_fcfs/_schedule_sjf functions and
 // their misleading early-return on a still-running current process
 void _schedule_queue_head() {
-    // Disable preemption during the scheduling decision
-    preempt_disable();
+    // Take the scheduler lock during the scheduling decision
+    sched_lock();
 
     // If the current process yielded voluntarily but is still runnable, put it
     // back in the ready queue according to the algorithm's insertion policy
@@ -376,14 +383,14 @@ void _schedule_queue_head() {
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Re-enable preemption
-    preempt_enable();
+    // Release the scheduler lock
+    sched_unlock();
 }
 
 // Multilevel Queue scheduling algorithm implementation
 void _schedule_mlq() {
-    // Disable preemption during scheduling
-    preempt_disable();
+    // Take the scheduler lock during the scheduling decision
+    sched_lock();
 
     // Re-insert the preempted process into its respective fixed priority queue
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
@@ -434,14 +441,14 @@ void _schedule_mlq() {
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Re-enable preemption
-    preempt_enable();
+    // Release the scheduler lock
+    sched_unlock();
 }
 
 // Multilevel Feedback Queue scheduling algorithm implementation
 void _schedule_mlfq() {
-    // Disable preemption during scheduling
-    preempt_disable();
+    // Take the scheduler lock during the scheduling decision
+    sched_lock();
 
     // If the process yielded voluntarily (e.g., for I/O) and still has time left (counter > 0)
     // we do not demote it. We put it back in its current priority queue.
@@ -490,8 +497,8 @@ void _schedule_mlfq() {
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Re-enable preemption
-    preempt_enable();
+    // Release the scheduler lock
+    sched_unlock();
 }
 
 // =========================================================================
@@ -532,9 +539,9 @@ static void _mlfq_on_tick() {
 
     // Penalty (Demotion): if the current process has just exhausted its time slice
     // without blocking, it is CPU-bound and gets demoted. The check on
-    // preempt_disabled mirrors the one in handle_timer_tick: while preemption is
-    // disabled the process will keep running, so it must not be parked in a queue
-    if (current_process != &init_process && current_process->counter <= 0 && current_process->preempt_disabled == 0) {
+    // sched_lock_count mirrors the one in handle_timer_tick: while the scheduler
+    // is locked the process will keep running, so it must not be parked in a queue
+    if (current_process != &init_process && current_process->counter <= 0 && current_process->sched_lock_count == 0) {
         // If it's not already in the lowest priority queue (Level 2)
         if (queue_level[current_process->pid] < 2) {
             // Demote it to the next lower queue level
@@ -673,8 +680,9 @@ void switch_to_process(struct PCB *next_process) {
     cpu_switch_to_process(previous_process, current_process);
 }
 
-// Function called at the end of a newly created process's first context switch to enable preemption
-void schedule_tail(void) { preempt_enable(); }
+// Function called at the end of a newly created process's first context switch to
+// release the scheduler lock it was created with (see copy_process)
+void schedule_tail(void) { sched_unlock(); }
 
 // =========================================================================
 // TIMER TICK
@@ -688,8 +696,8 @@ void handle_timer_tick() {
     // (currently only MLFQ does: periodic boost and demotions)
     if (active_algorithm->on_tick) active_algorithm->on_tick();
 
-    // If the current process still has time left OR preemption is explicitly disabled
-    if (current_process->counter > 0 || current_process->preempt_disabled > 0) {
+    // If the current process still has time left OR it holds the scheduler lock
+    if (current_process->counter > 0 || current_process->sched_lock_count > 0) {
         // Return immediately, allowing the process to continue running
         return;
     }
@@ -715,8 +723,8 @@ void handle_timer_tick() {
 // =========================================================================
 // Function called when a process terminates
 void exit_process() {
-    // Disable preemption to ensure atomicity of the exit process
-    preempt_disable();
+    // Take the scheduler lock to ensure atomicity of the exit process
+    sched_lock();
     // Set the current process's state to ZOMBIE
     current_process->state = PROCESS_ZOMBIE;
     
@@ -737,8 +745,8 @@ void exit_process() {
         }
     }
 
-    // Re-enable preemption
-    preempt_enable();
+    // Release the scheduler lock
+    sched_unlock();
     // Call the scheduler to switch away from the dying process permanently
     schedule();
 }
