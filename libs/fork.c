@@ -49,7 +49,9 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   int process_id = n_processes;
   new_process->flags = clone_flags;
   new_process->priority = current_process->priority;
-  new_process->state = PROCESS_RUNNING;
+  // The new process is READY (runnable): it will become RUNNING only when the
+  // scheduler dispatches it in switch_to_process
+  new_process->state = PROCESS_READY;
   new_process->counter = current_process->priority;
   
   new_process->counter = 10;

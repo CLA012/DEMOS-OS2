@@ -59,7 +59,10 @@ void enqueue_process_to(ProcessQueue* queue, struct PCB* process) {
     if (!process || process == &init_process) return;
     // Ensure the process's next pointer is clear before adding it
     process->next_ready = NULL;
-    
+    // A process sitting in a ready queue is READY: it will become RUNNING only
+    // when switch_to_process assigns it the CPU
+    process->state = PROCESS_READY;
+
     // If the queue is currently empty
     if (queue->tail == NULL) {
         // The new process becomes both the head of the queue...
@@ -102,6 +105,8 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
     if (!process || process == &init_process) return;
     // Clear the process's next pointer
     process->next_ready = NULL;
+    // A process sitting in a ready queue is READY (see enqueue_process_to)
+    process->state = PROCESS_READY;
 
     // Determine if the new process should be placed at the very front of the queue
     // based on whether we are sorting ascending (SJF) or descending (LJF)
@@ -168,8 +173,9 @@ static void _enqueue_sjf(struct PCB* process) {
 // so a process that becomes ready does not need to be inserted anywhere.
 // This explicitly empty callback documents that choice
 static void _enqueue_priority_aging(struct PCB* process) {
-    // Nothing to do: the process is selectable just by being in processes[]
-    (void)process;
+    // No queue insertion: marking the process READY is enough to make it
+    // selectable by the scan in _schedule_priority_aging
+    process->state = PROCESS_READY;
 }
 
 // --- MLQ (Multilevel Queue): fixed queue chosen by PID parity ---
@@ -212,8 +218,8 @@ int add_process_to_scheduler(struct PCB* process) {
     // MLFQ Rule: Every new process starts at the highest priority queue (Level 0)
     queue_level[process->pid] = 0; 
 
-    // If the process is initialized in a RUNNING state...
-    if (process->state == PROCESS_RUNNING) {
+    // If the process is initialized in a READY (runnable) state...
+    if (process->state == PROCESS_READY) {
         // ...enqueue it into the ready queues using the routing function
         enqueue_process(process);
     }
@@ -256,8 +262,12 @@ void _schedule_priority_aging() {
       if (processes[i]) {
         // Process any pending signals (kill, stop, resume) for this process
         handle_process_signals(processes[i]);
-        // If the process is ready to run and its counter is higher than the current max
-        if (processes[i]->state == PROCESS_RUNNING && processes[i]->counter > max_counter) {
+        // Both READY processes and the currently RUNNING one compete with their
+        // residual counter; the idle init process never takes part in the
+        // selection (it is only the fallback when nobody else is runnable)
+        if (processes[i] != &init_process
+            && (processes[i]->state == PROCESS_READY || processes[i]->state == PROCESS_RUNNING)
+            && processes[i]->counter > max_counter) {
           // Update the maximum counter found so far
           max_counter = processes[i]->counter;
           // Save the index of this process as the next potential candidate
@@ -286,9 +296,9 @@ void _schedule_priority_aging() {
   struct PCB* next_process = processes[next_process_index];
   // Handle signals for the selected process one more time just in case
   handle_process_signals(next_process);
-  
-  // Verify the process is still in RUNNING state (signals might have stopped/killed it)
-  if (next_process->state == PROCESS_RUNNING) {
+
+  // Verify the process is still runnable (signals might have stopped/killed it)
+  if (next_process->state == PROCESS_READY || next_process->state == PROCESS_RUNNING) {
     // Perform the context switch to the selected process
     switch_to_process(next_process);
   }
@@ -317,17 +327,18 @@ void _schedule_round_robin() {
     while ((next_process = dequeue_process_from(&ready_queue)) != NULL) {
         // Process any pending signals for the extracted process
         handle_process_signals(next_process);
-        // If the process is still RUNNING after handling signals, break the loop
-        if (next_process->state == PROCESS_RUNNING) break;
+        // If the process is still READY after handling signals, break the loop
+        if (next_process->state == PROCESS_READY) break;
     }
 
     // If the queue was empty or all processes were stopped/zombies
     if (next_process == NULL) next_process = &init_process; // Fallback to idle task
     // Otherwise, recharge its time quantum (e.g., 10 ticks)
-    else next_process->counter = 10; 
+    else next_process->counter = 10;
 
-    // If the selected process is different from the current one, switch context
-    if (current_process != next_process) switch_to_process(next_process);
+    // Dispatch the selected process (switch_to_process marks it RUNNING and does
+    // nothing more if it is already the current one)
+    switch_to_process(next_process);
     // Re-enable preemption
     preempt_enable();
 }
@@ -355,15 +366,16 @@ void _schedule_queue_head() {
     while ((next_process = dequeue_process_from(&ready_queue)) != NULL) {
         // Handle pending signals
         handle_process_signals(next_process);
-        // If it's ready to run, break the loop and choose it
-        if (next_process->state == PROCESS_RUNNING) break;
+        // If it's still READY, break the loop and choose it
+        if (next_process->state == PROCESS_READY) break;
     }
 
     // If no valid process was found, fallback to the init process
     if (next_process == NULL) next_process = &init_process;
 
-    // Perform context switch if we are changing processes
-    if (current_process != next_process) switch_to_process(next_process);
+    // Dispatch the selected process (switch_to_process marks it RUNNING and does
+    // nothing more if it is already the current one)
+    switch_to_process(next_process);
     // Re-enable preemption
     preempt_enable();
 }
@@ -388,8 +400,8 @@ void _schedule_mlq() {
     while ((next_process = dequeue_process_from(&mlq_queues[0])) != NULL) {
         // Handle pending signals
         handle_process_signals(next_process);
-        // If ready to run
-        if (next_process->state == PROCESS_RUNNING) {
+        // If still READY
+        if (next_process->state == PROCESS_READY) {
             // Assign a time quantum of 10 ticks
             next_process->counter = 10;
             // Break loop as we found a process
@@ -403,8 +415,8 @@ void _schedule_mlq() {
         while ((next_process = dequeue_process_from(&mlq_queues[1])) != NULL) {
             // Handle pending signals
             handle_process_signals(next_process);
-            // If ready to run
-            if (next_process->state == PROCESS_RUNNING) {
+            // If still READY
+            if (next_process->state == PROCESS_READY) {
                 // Assign a time quantum of 20 ticks: background (batch/CPU-bound) processes
                 // get a longer slice than foreground ones to reduce context switches.
                 // Without this the counter stayed at 0, so after the first expiry a
@@ -419,8 +431,9 @@ void _schedule_mlq() {
     // Fallback to init process if both queues are empty
     if (next_process == NULL) next_process = &init_process;
 
-    // Perform context switch if necessary
-    if (current_process != next_process) switch_to_process(next_process);
+    // Dispatch the selected process (switch_to_process marks it RUNNING and does
+    // nothing more if it is already the current one)
+    switch_to_process(next_process);
     // Re-enable preemption
     preempt_enable();
 }
@@ -448,8 +461,8 @@ void _schedule_mlfq() {
         while ((next_process = dequeue_process_from(&mlfq_queues[q])) != NULL) {
             // Handle pending signals
             handle_process_signals(next_process);
-            // If the process is runnable
-            if (next_process->state == PROCESS_RUNNING) {
+            // If the process is still READY
+            if (next_process->state == PROCESS_READY) {
                 // Record the queue level it came from
                 target_queue = q;
                 // Break out of the while loop
@@ -474,8 +487,9 @@ void _schedule_mlfq() {
         else next_process->counter = 20;
     }
 
-    // Perform context switch if necessary
-    if (current_process != next_process) switch_to_process(next_process);
+    // Dispatch the selected process (switch_to_process marks it RUNNING and does
+    // nothing more if it is already the current one)
+    switch_to_process(next_process);
     // Re-enable preemption
     preempt_enable();
 }
@@ -623,21 +637,33 @@ void handle_process_signals(struct PCB* process) {
         
     // Check if the SIGNAL_RESUME bit is set
     } else if (process->pending_signals & (1 << SIGNAL_RESUME)) {
-        // Change process state back to RUNNING (ready to execute)
-        process->state = PROCESS_RUNNING;
         // Clear the SIGNAL_RESUME bit from the pending signals mask
         process->pending_signals &= ~(1 << SIGNAL_RESUME);
-        // Wake up the process by re-inserting it into the ready queues
-        enqueue_process(process); 
+        // A resume only makes sense for a STOPPED process: re-enqueueing a process
+        // that is already READY in a queue would link it twice into the intrusive
+        // lists, corrupting them
+        if (process->state == PROCESS_STOPPED) {
+            // Change process state back to READY (runnable, waiting for the CPU)
+            process->state = PROCESS_READY;
+            // Wake up the process by re-inserting it into the ready queues
+            enqueue_process(process);
+        }
     }
 }
 
 // Function to handle the high-level context switch preparation
 void switch_to_process(struct PCB *next_process) {
-    // If the selected process is already running, do nothing
+    // The dispatched process becomes the (only) RUNNING one. This must happen even
+    // when the scheduler re-selects the current process, which may just have been
+    // marked READY by a re-enqueue in the pick function
+    next_process->state = PROCESS_RUNNING;
+    // If the selected process is already running, no context switch is needed
     if (current_process == next_process) return;
     // Save the pointer to the currently running process
     struct PCB *previous_process = current_process;
+    // If the outgoing process is still runnable (preempted, not blocked) and was
+    // not already re-enqueued by the pick function, it goes back to READY
+    if (previous_process->state == PROCESS_RUNNING) previous_process->state = PROCESS_READY;
     // Update the global current_process pointer to the new process
     current_process = next_process;
 
@@ -701,8 +727,8 @@ void exit_process() {
 
         // If a process is blocked (WAITING) and specifically waiting for the exiting process's PID
         if (processes[i]->state == PROCESS_WAITING_ANOTHER_PROCESS && processes[i]->pid_to_wait == current_process->pid) {
-            // Wake up the waiting parent process
-            processes[i]->state = PROCESS_RUNNING;
+            // Wake up the waiting parent process (READY: it still has to be dispatched)
+            processes[i]->state = PROCESS_READY;
             // Clear the wait condition
             processes[i]->pid_to_wait = -1;
             

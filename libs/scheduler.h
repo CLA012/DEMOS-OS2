@@ -93,6 +93,8 @@ struct PCB {
   struct PCB* next_ready;
 };
 
+// The process currently owning the CPU: at most one process is in this state at
+// any time, and the transition to it happens only inside switch_to_process
 #define PROCESS_RUNNING 1
 #define PROCESS_ZOMBIE 2
 #define PROCESS_WAITING_UART_INPUT 3
@@ -100,6 +102,10 @@ struct PCB {
 #define PROCESS_WAITING_TO_SEND_MESSAGE 5
 #define PROCESS_WAITING_ANOTHER_PROCESS 6
 #define PROCESS_STOPPED 7
+// The process is runnable but does NOT have the CPU: it sits in a ready queue
+// (or, for priority aging, simply in processes[]) waiting to be dispatched.
+// It goes back to this state every time it is re-enqueued
+#define PROCESS_READY 8
 
 #define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
