@@ -249,17 +249,21 @@ void switch_to_process(struct PCB *next_process);
 // External declaration for the assembly routine that actually swaps CPU registers
 extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 
-// Priority scheduling algorithm with an aging mechanism to prevent starvation
+// Priority scheduling algorithm with an aging mechanism to prevent starvation.
+// It follows the historic Linux "epoch" scheme, where time_slice plays a double
+// role: residual quantum AND dynamic priority. The runnable process with the
+// largest time_slice wins the CPU; when all runnable processes have exhausted
+// their slice the epoch ends and every process is recharged (see below)
 void _schedule_priority_aging() {
   // Take the scheduler lock so the decision cannot be interrupted
   sched_lock();
-  // Variables to track the highest counter value and the index of the chosen process
-  long max_counter, next_process_index;
+  // Variables to track the highest residual time slice and the index of the chosen process
+  long max_time_slice, next_process_index;
 
   // Infinite loop to find a process to run
   while (1) {
-    // Reset the max counter for this pass
-    max_counter = 0;
+    // Reset the max time slice for this pass
+    max_time_slice = 0;
     // Default to the init process (index 0)
     next_process_index = 0;
     
@@ -270,31 +274,36 @@ void _schedule_priority_aging() {
         // Process any pending signals (kill, stop, resume) for this process
         handle_process_signals(processes[i]);
         // Both READY processes and the currently RUNNING one compete with their
-        // residual counter; the idle init process never takes part in the
+        // residual time_slice; the idle init process never takes part in the
         // selection (it is only the fallback when nobody else is runnable)
         if (processes[i] != &init_process
             && (processes[i]->state == PROCESS_READY || processes[i]->state == PROCESS_RUNNING)
-            && processes[i]->counter > max_counter) {
-          // Update the maximum counter found so far
-          max_counter = processes[i]->counter;
+            && processes[i]->time_slice > max_time_slice) {
+          // Update the maximum time slice found so far
+          max_time_slice = processes[i]->time_slice;
           // Save the index of this process as the next potential candidate
           next_process_index = i;
         }
       }
     }
 
-    // If we found at least one ready process with a counter greater than 0
-    if (max_counter > 0) {
+    // If we found at least one ready process with a residual time slice greater than 0
+    if (max_time_slice > 0) {
       // Break out of the infinite loop
       break;
     }
 
-    // If no process had a counter > 0 (all are exhausted), we apply aging
+    // If no process had time_slice > 0 (all runnable ones are exhausted), the
+    // epoch is over: we start a new one applying the aging rule
     for (int i = 0; i < N_PROCESSES; i++) {
       // If the process exists
       if (processes[i]) {
-        // Recalculate its counter: halve the remaining ticks and add its base priority
-        processes[i]->counter = (processes[i]->counter >> 1) + processes[i]->priority;
+        // New epoch: time_slice = time_slice/2 + priority, for ALL processes,
+        // blocked ones included. A CPU-bound process that used up its slice simply
+        // reloads its static priority; a blocked process keeps half of its residual
+        // slice as a bonus (geometric series capped at 2*priority), so I/O-bound
+        // processes gain dynamic priority: this is the aging that prevents starvation
+        processes[i]->time_slice = (processes[i]->time_slice >> 1) + processes[i]->priority;
       }
     }
   } // End of while(1) loop
@@ -341,7 +350,7 @@ void _schedule_round_robin() {
     // If the queue was empty or all processes were stopped/zombies
     if (next_process == NULL) next_process = &init_process; // Fallback to idle task
     // Otherwise, recharge its time quantum (e.g., 10 ticks)
-    else next_process->counter = 10;
+    else next_process->time_slice = 10;
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
@@ -410,7 +419,7 @@ void _schedule_mlq() {
         // If still READY
         if (next_process->state == PROCESS_READY) {
             // Assign a time quantum of 10 ticks
-            next_process->counter = 10;
+            next_process->time_slice = 10;
             // Break loop as we found a process
             break;
         }
@@ -426,9 +435,9 @@ void _schedule_mlq() {
             if (next_process->state == PROCESS_READY) {
                 // Assign a time quantum of 20 ticks: background (batch/CPU-bound) processes
                 // get a longer slice than foreground ones to reduce context switches.
-                // Without this the counter stayed at 0, so after the first expiry a
+                // Without this the time slice stayed at 0, so after the first expiry a
                 // background process ran with a de facto quantum of a single tick
-                next_process->counter = 20;
+                next_process->time_slice = 20;
                 // Break loop as we found a process
                 break;
             }
@@ -450,9 +459,9 @@ void _schedule_mlfq() {
     // Take the scheduler lock during the scheduling decision
     sched_lock();
 
-    // If the process yielded voluntarily (e.g., for I/O) and still has time left (counter > 0)
+    // If the process yielded voluntarily (e.g., for I/O) and still has time left (time_slice > 0)
     // we do not demote it. We put it back in its current priority queue.
-    if (current_process != &init_process && current_process->state == PROCESS_RUNNING && current_process->counter > 0) {
+    if (current_process != &init_process && current_process->state == PROCESS_RUNNING && current_process->time_slice > 0) {
          // Re-insert into the queue matching its current tracked level
          enqueue_process_to(&mlfq_queues[queue_level[current_process->pid]], current_process);
     }
@@ -487,11 +496,11 @@ void _schedule_mlfq() {
     } else {
         // Assign differentiated time quanta based on the priority queue level
         // Highest priority gets the shortest time slice
-        if (target_queue == 0) next_process->counter = 5;
+        if (target_queue == 0) next_process->time_slice = 5;
         // Medium priority gets a medium time slice
-        else if (target_queue == 1) next_process->counter = 10;
+        else if (target_queue == 1) next_process->time_slice = 10;
         // Lowest priority gets the longest time slice (best for CPU-bound tasks)
-        else next_process->counter = 20;
+        else next_process->time_slice = 20;
     }
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
@@ -541,7 +550,7 @@ static void _mlfq_on_tick() {
     // without blocking, it is CPU-bound and gets demoted. The check on
     // sched_lock_count mirrors the one in handle_timer_tick: while the scheduler
     // is locked the process will keep running, so it must not be parked in a queue
-    if (current_process != &init_process && current_process->counter <= 0 && current_process->sched_lock_count == 0) {
+    if (current_process != &init_process && current_process->time_slice <= 0 && current_process->sched_lock_count == 0) {
         // If it's not already in the lowest priority queue (Level 2)
         if (queue_level[current_process->pid] < 2) {
             // Demote it to the next lower queue level
@@ -615,7 +624,7 @@ void _schedule() {
 // Wrapper function to trigger a manual schedule (e.g., when a process yields or blocks)
 void schedule() {
     // Force the current process's time slice to 0 so it gets preempted/re-evaluated
-    current_process->counter = 0;
+    current_process->time_slice = 0;
     // Call the master dispatcher
     _schedule();
 }
@@ -689,21 +698,21 @@ void schedule_tail(void) { sched_unlock(); }
 // =========================================================================
 // Function called by the hardware timer interrupt handler at regular intervals
 void handle_timer_tick() {
-    // Decrement the time slice counter of the currently running process
-    current_process->counter -= 1;
+    // Decrement the residual time slice of the currently running process
+    current_process->time_slice -= 1;
 
     // Run the active algorithm's per-tick bookkeeping, if it has any
     // (currently only MLFQ does: periodic boost and demotions)
     if (active_algorithm->on_tick) active_algorithm->on_tick();
 
     // If the current process still has time left OR it holds the scheduler lock
-    if (current_process->counter > 0 || current_process->sched_lock_count > 0) {
+    if (current_process->time_slice > 0 || current_process->sched_lock_count > 0) {
         // Return immediately, allowing the process to continue running
         return;
     }
 
-    // Safety catch: ensure counter doesn't go negative
-    current_process->counter = 0;
+    // Safety catch: ensure the time slice doesn't go negative
+    current_process->time_slice = 0;
 
     // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
     // current process keeps the CPU until it blocks, yields or exits, so the

@@ -74,7 +74,14 @@ struct MessagesCircularBuffer {
 struct PCB {
   struct cpu_context cpu_context;
   long state;
-  long counter;
+  // Residual time slice in timer ticks: recharged by the scheduling algorithm
+  // when the process is dispatched and decremented at every timer tick; when it
+  // reaches 0 the process can be preempted. For the priority aging algorithm it
+  // doubles as the DYNAMIC priority of the process (historic Linux epoch scheme,
+  // see _schedule_priority_aging in scheduler.c)
+  long time_slice;
+  // Static priority: used by the priority aging algorithm to recharge time_slice
+  // at the beginning of every epoch
   long priority;
   // Scheduler lock nesting counter: while greater than 0 the timer tick will not
   // preempt this process (critical-section guard, see sched_lock/sched_unlock).

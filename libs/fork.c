@@ -52,9 +52,9 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   // The new process is READY (runnable): it will become RUNNING only when the
   // scheduler dispatches it in switch_to_process
   new_process->state = PROCESS_READY;
-  new_process->counter = current_process->priority;
-  
-  new_process->counter = 10;
+  new_process->time_slice = current_process->priority;
+
+  new_process->time_slice = 10;
   
   // The child is born holding the scheduler lock: schedule_tail releases it
   // at the end of its first context switch
