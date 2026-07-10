@@ -91,6 +91,11 @@ struct PCB {
   // Timer ticks consumed so far in the current CPU burst (the measurement starts
   // when the process receives the CPU and ends when it blocks)
   long burst_ticks;
+  // Multilevel queue class (QUEUE_CLASS_FOREGROUND / QUEUE_CLASS_BACKGROUND):
+  // chosen at process creation (the child inherits the parent's class) and used
+  // by MLQ to pick the fixed queue. It replaces the old PID-parity criterion,
+  // which gave the user no control since PIDs are assigned automatically
+  int queue_class;
   // Scheduler lock nesting counter: while greater than 0 the timer tick will not
   // preempt this process (critical-section guard, see sched_lock/sched_unlock).
   // Not to be confused with the algorithm's preemption policy (is_preemptive)
@@ -125,7 +130,11 @@ struct PCB {
 // It goes back to this state every time it is re-enqueued
 #define PROCESS_READY 8
 
-#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
+// Classes for the multilevel queue algorithms (field queue_class of the PCB)
+#define QUEUE_CLASS_FOREGROUND 0
+#define QUEUE_CLASS_BACKGROUND 1
+
+#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, QUEUE_CLASS_FOREGROUND, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
 // =========================================================================
 // SCHEDULING ALGORITHM DESCRIPTOR

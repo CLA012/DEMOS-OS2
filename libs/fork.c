@@ -59,6 +59,11 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   new_process->est_burst = current_process->est_burst;
   // No tick consumed yet in the current burst
   new_process->burst_ticks = 0;
+
+  // The multilevel queue class is chosen at creation: the child inherits the
+  // parent's class (the init process is FOREGROUND, so that is the default).
+  // It can be changed on the PCB before the process is first enqueued
+  new_process->queue_class = current_process->queue_class;
   
   // The child is born holding the scheduler lock: schedule_tail releases it
   // at the end of its first context switch

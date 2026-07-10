@@ -186,11 +186,14 @@ static void _enqueue_priority_aging(struct PCB* process) {
     process->state = PROCESS_READY;
 }
 
-// --- MLQ (Multilevel Queue): fixed queue chosen by PID parity ---
+// --- MLQ (Multilevel Queue): fixed queue chosen by the process's class ---
+// The class is a PCB field set at process creation (see fork.c), replacing the
+// old PID-parity criterion that gave the user no control over the priority of
+// the processes it creates (PIDs are assigned automatically)
 static void _enqueue_mlq(struct PCB* process) {
-    // If the PID is odd, put it in the foreground queue (index 0)
-    if (process->pid % 2 != 0) enqueue_process_to(&mlq_queues[0], process);
-    // If the PID is even, put it in the background queue (index 1)
+    // Foreground processes go into the high priority queue (index 0)
+    if (process->queue_class == QUEUE_CLASS_FOREGROUND) enqueue_process_to(&mlq_queues[0], process);
+    // Background processes go into the low priority queue (index 1)
     else enqueue_process_to(&mlq_queues[1], process);
 }
 
@@ -409,12 +412,9 @@ void _schedule_mlq() {
     // Take the scheduler lock during the scheduling decision
     sched_lock();
 
-    // Re-insert the preempted process into its respective fixed priority queue
+    // Re-insert the preempted process into the fixed queue of its class
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
-        // If PID is odd, put it in the Foreground queue
-        if (current_process->pid % 2 != 0) enqueue_process_to(&mlq_queues[0], current_process);
-        // If PID is even, put it in the Background queue
-        else enqueue_process_to(&mlq_queues[1], current_process); 
+        _enqueue_mlq(current_process);
     }
 
     // Initialize pointer for the next process
