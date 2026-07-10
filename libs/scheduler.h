@@ -137,6 +137,28 @@ struct PCB {
 #define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, QUEUE_CLASS_FOREGROUND, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
 // =========================================================================
+// MULTILEVEL QUEUE POLICY
+// =========================================================================
+// MLQ and MLFQ share a single implementation: an array of priority queues
+// scanned from level 0 (highest priority) downwards. What distinguishes them is
+// only this set of parameters: number of levels, time quantum per level and the
+// migration rules. MLQ is the degenerate case with a null migration policy:
+// every process stays forever in the queue chosen by its queue_class.
+#define ML_MAX_LEVELS 3
+typedef struct {
+  // Number of priority levels actually used (at most ML_MAX_LEVELS)
+  int n_levels;
+  // Time quantum in ticks assigned when a process is picked from each level
+  long quantum[ML_MAX_LEVELS];
+  // Migration rule: if 1, a process that exhausts its quantum is demoted to the
+  // next lower level (MLFQ); if 0 it stays at its level forever (MLQ)
+  int demote_on_expiry;
+  // Migration rule: if > 0, every boost_period ticks all processes are moved
+  // back to level 0 to prevent starvation (MLFQ); 0 disables the boost (MLQ)
+  int boost_period;
+} MultilevelPolicy;
+
+// =========================================================================
 // SCHEDULING ALGORITHM DESCRIPTOR
 // =========================================================================
 // Every scheduling algorithm is described by a table of function pointers, so that
@@ -149,11 +171,13 @@ typedef struct {
   void (*enqueue)(struct PCB* process);
   // Selects the next process to run and performs the context switch
   void (*pick_next)(void);
-  // Optional per-tick bookkeeping (e.g. MLFQ promotions/demotions); NULL if unused
+  // Optional per-tick bookkeeping (multilevel promotions/demotions); NULL if unused
   void (*on_tick)(void);
   // If 0 the timer tick never forces a context switch: the running process keeps
   // the CPU until it blocks, yields or exits (FCFS, SJF, LJF)
   int is_preemptive;
+  // Parameters of the multilevel queue engine (only for MLQ/MLFQ, else NULL)
+  const MultilevelPolicy* ml_policy;
 } SchedAlgorithm;
 
 // Descriptors for all the available scheduling algorithms (defined in scheduler.c)

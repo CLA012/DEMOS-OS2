@@ -32,13 +32,31 @@ typedef struct {
 #define QUEUE_INIT {NULL, NULL}
 
 // Define the ready queue used by standard algorithms like FCFS, RR, SJF, LJF
-static ProcessQueue ready_queue = QUEUE_INIT;                              
-// Define an array of 2 queues for Multilevel Queue (MLQ: 0=Foreground, 1=Background)
-static ProcessQueue mlq_queues[2] = {QUEUE_INIT, QUEUE_INIT};              
-// Define an array of 3 queues for Multilevel Feedback Queue (MLFQ)
-static ProcessQueue mlfq_queues[3] = {QUEUE_INIT, QUEUE_INIT, QUEUE_INIT};
-// Array to track the current MLFQ queue level (priority) for each process by its PID
+static ProcessQueue ready_queue = QUEUE_INIT;
+// Define the array of queues shared by the multilevel algorithms (MLQ and MLFQ),
+// scanned from level 0 (highest priority) to n_levels - 1 (lowest priority)
+static ProcessQueue ml_queues[ML_MAX_LEVELS] = {QUEUE_INIT, QUEUE_INIT, QUEUE_INIT};
+// Array to track the current queue level of each process by its PID: for MLQ it
+// never changes after creation, for MLFQ it follows demotions and boosts
 static int queue_level[N_PROCESSES] = {0};
+
+// --- Multilevel policies: MLQ and MLFQ are the same engine with different numbers ---
+// MLQ: two fixed queues (foreground, quantum 10; background, quantum 20 to reduce
+// context switches for batch work) and a null migration policy
+static const MultilevelPolicy ml_policy_mlq = {
+    .n_levels = 2,
+    .quantum = {10, 20, 0},
+    .demote_on_expiry = 0,
+    .boost_period = 0,
+};
+// MLFQ: three queues with growing quanta (CPU-bound processes sink to the bottom
+// where the slice is longer), demotion on quantum expiry and periodic boost
+static const MultilevelPolicy ml_policy_mlfq = {
+    .n_levels = 3,
+    .quantum = {5, 10, 20},
+    .demote_on_expiry = 1,
+    .boost_period = 1000,
+};
 
 // =========================================================================
 // ACTIVE ALGORITHM SELECTION (single configuration point)
@@ -194,21 +212,15 @@ static void _enqueue_priority_aging(struct PCB* process) {
     process->state = PROCESS_READY;
 }
 
-// --- MLQ (Multilevel Queue): fixed queue chosen by the process's class ---
-// The class is a PCB field set at process creation (see fork.c), replacing the
+// --- MLQ / MLFQ: insertion into the queue matching the process's current level ---
+// The starting level comes from the queue_class field of the PCB, chosen at
+// process creation (see fork.c and add_process_to_scheduler): it replaces the
 // old PID-parity criterion that gave the user no control over the priority of
-// the processes it creates (PIDs are assigned automatically)
-static void _enqueue_mlq(struct PCB* process) {
-    // Foreground processes go into the high priority queue (index 0)
-    if (process->queue_class == QUEUE_CLASS_FOREGROUND) enqueue_process_to(&mlq_queues[0], process);
-    // Background processes go into the low priority queue (index 1)
-    else enqueue_process_to(&mlq_queues[1], process);
-}
-
-// --- MLFQ (Multilevel Feedback Queue): queue matching the process's current level ---
-static void _enqueue_mlfq(struct PCB* process) {
-    // Enqueue the process into the specific MLFQ queue corresponding to its current priority level
-    enqueue_process_to(&mlfq_queues[queue_level[process->pid]], process);
+// the processes it creates (PIDs are assigned automatically). For MLQ the level
+// never changes afterwards; for MLFQ it follows demotions and boosts
+static void _enqueue_multilevel(struct PCB* process) {
+    // Enqueue the process into the queue corresponding to its current level
+    enqueue_process_to(&ml_queues[queue_level[process->pid]], process);
 }
 
 // =========================================================================
@@ -234,8 +246,19 @@ int add_process_to_scheduler(struct PCB* process) {
     
     // Store the process pointer in the global processes array at the index of its PID
     processes[process->pid] = process;
-    // MLFQ Rule: Every new process starts at the highest priority queue (Level 0)
-    queue_level[process->pid] = 0; 
+
+    // The starting level of the multilevel algorithms comes from the process's
+    // queue_class (foreground = 0, the highest priority: this preserves the MLFQ
+    // rule that new processes start at the top), clamped to the levels available
+    int start_level = process->queue_class;
+    // Guard against classes outside the range of existing queues
+    if (start_level < 0) start_level = 0;
+    if (start_level >= ML_MAX_LEVELS) start_level = ML_MAX_LEVELS - 1;
+    // Clamp to the levels actually used by the active multilevel policy, if any
+    if (active_algorithm->ml_policy && start_level >= active_algorithm->ml_policy->n_levels) {
+        start_level = active_algorithm->ml_policy->n_levels - 1;
+    }
+    queue_level[process->pid] = start_level;
 
     // If the process is initialized in a READY (runnable) state...
     if (process->state == PROCESS_READY) {
@@ -415,109 +438,52 @@ void _schedule_queue_head() {
     sched_unlock();
 }
 
-// Multilevel Queue scheduling algorithm implementation
-void _schedule_mlq() {
+// Multilevel queue scheduling, shared by MLQ and MLFQ: scan the queues from the
+// highest priority level (0) downwards and pick the first READY process,
+// assigning the time quantum configured for the level it came from. The
+// outgoing process, if still runnable, is parked at its current level: any
+// demotion has already been recorded in queue_level by _multilevel_on_tick,
+// while a voluntary yield keeps the process at its level
+void _schedule_multilevel() {
     // Take the scheduler lock during the scheduling decision
     sched_lock();
 
-    // Re-insert the preempted process into the fixed queue of its class
+    // Parameters (levels, quanta, migration rules) of the active algorithm
+    const MultilevelPolicy* policy = active_algorithm->ml_policy;
+
+    // Re-insert the outgoing process, if still runnable, at its current level
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
-        _enqueue_mlq(current_process);
+        _enqueue_multilevel(current_process);
     }
 
     // Initialize pointer for the next process
     struct PCB* next_process = NULL;
+    // Variable to track which queue level the process was extracted from
+    int target_level = -1;
 
-    // Search in the Foreground queue first (Highest Priority)
-    while ((next_process = dequeue_process_from(&mlq_queues[0])) != NULL) {
-        // Handle pending signals
-        handle_process_signals(next_process);
-        // If still READY
-        if (next_process->state == PROCESS_READY) {
-            // Assign a time quantum of 10 ticks
-            next_process->time_slice = 10;
-            // Break loop as we found a process
-            break;
-        }
-    }
-
-    // If the Foreground queue was empty, search in the Background queue (Low Priority)
-    if (next_process == NULL) {
-        // Dequeue from Background queue
-        while ((next_process = dequeue_process_from(&mlq_queues[1])) != NULL) {
-            // Handle pending signals
-            handle_process_signals(next_process);
-            // If still READY
-            if (next_process->state == PROCESS_READY) {
-                // Assign a time quantum of 20 ticks: background (batch/CPU-bound) processes
-                // get a longer slice than foreground ones to reduce context switches.
-                // Without this the time slice stayed at 0, so after the first expiry a
-                // background process ran with a de facto quantum of a single tick
-                next_process->time_slice = 20;
-                // Break loop as we found a process
-                break;
-            }
-        }
-    }
-
-    // Fallback to init process if both queues are empty
-    if (next_process == NULL) next_process = &init_process;
-
-    // Dispatch the selected process (switch_to_process marks it RUNNING and does
-    // nothing more if it is already the current one)
-    switch_to_process(next_process);
-    // Release the scheduler lock
-    sched_unlock();
-}
-
-// Multilevel Feedback Queue scheduling algorithm implementation
-void _schedule_mlfq() {
-    // Take the scheduler lock during the scheduling decision
-    sched_lock();
-
-    // If the process yielded voluntarily (e.g., for I/O) and still has time left (time_slice > 0)
-    // we do not demote it. We put it back in its current priority queue.
-    if (current_process != &init_process && current_process->state == PROCESS_RUNNING && current_process->time_slice > 0) {
-         // Re-insert into the queue matching its current tracked level
-         enqueue_process_to(&mlfq_queues[queue_level[current_process->pid]], current_process);
-    }
-
-    // Initialize pointer for the next process
-    struct PCB* next_process = NULL;
-    // Variable to track which queue the process was extracted from
-    int target_queue = -1;
-
-    // O(1) Cascade: iterate through queues starting from 0 (Highest Priority) to 2 (Lowest)
-    for (int q = 0; q < 3; q++) {
+    // Cascade: iterate through the levels from 0 (Highest Priority) downwards
+    for (int q = 0; q < policy->n_levels; q++) {
         // Dequeue processes from the current queue level
-        while ((next_process = dequeue_process_from(&mlfq_queues[q])) != NULL) {
+        while ((next_process = dequeue_process_from(&ml_queues[q])) != NULL) {
             // Handle pending signals
             handle_process_signals(next_process);
             // If the process is still READY
             if (next_process->state == PROCESS_READY) {
                 // Record the queue level it came from
-                target_queue = q;
+                target_level = q;
                 // Break out of the while loop
                 break;
             }
         }
-        // If we found a process in this queue level, break the outer for-loop (do not check lower priority queues)
-        if (target_queue != -1) break; 
+        // If we found a process in this level, do not check lower priority levels
+        if (target_level != -1) break;
     }
 
-    // If all queues were completely empty
-    if (next_process == NULL) {
-        // Set the next process to the idle task
-        next_process = &init_process;
-    } else {
-        // Assign differentiated time quanta based on the priority queue level
-        // Highest priority gets the shortest time slice
-        if (target_queue == 0) next_process->time_slice = 5;
-        // Medium priority gets a medium time slice
-        else if (target_queue == 1) next_process->time_slice = 10;
-        // Lowest priority gets the longest time slice (best for CPU-bound tasks)
-        else next_process->time_slice = 20;
-    }
+    // If all queues were completely empty, fallback to the idle init process
+    if (next_process == NULL) next_process = &init_process;
+    // Otherwise assign the time quantum configured for the level it came from
+    // (lower levels get longer quanta: fewer context switches for CPU-bound work)
+    else next_process->time_slice = policy->quantum[target_level];
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
@@ -527,53 +493,60 @@ void _schedule_mlfq() {
 }
 
 // =========================================================================
-// MLFQ PER-TICK BOOKKEEPING (the on_tick callback of sched_mlfq)
+// MULTILEVEL PER-TICK BOOKKEEPING (the on_tick callback of MLQ and MLFQ)
 // =========================================================================
-// Static variable to count hardware timer ticks for the MLFQ boost mechanism
-static int mlfq_ticks_since_boost = 0;
+// Static variable to count hardware timer ticks for the periodic boost
+static int ml_ticks_since_boost = 0;
 
-// Runs at every timer tick, but only when MLFQ is the active algorithm: it is
-// registered as the on_tick callback of the sched_mlfq descriptor, so no other
-// algorithm ever executes it (the queues are intrusive lists sharing the PCB's
-// next_ready pointer: feeding mlfq_queues while e.g. Round Robin uses
-// ready_queue would corrupt both lists)
-static void _mlfq_on_tick() {
-    // Increment the counter tracking time since the last MLFQ priority boost
-    mlfq_ticks_since_boost++;
-    // Anti-Starvation Rule: If 1000 ticks have passed
-    if (mlfq_ticks_since_boost >= 1000) {
-        // Physically empty the lower priority queues (1 and 2) and move everyone to queue 0
-        for (int q = 1; q < 3; q++) {
-            struct PCB* p;
-            // Dequeue until empty
-            while ((p = dequeue_process_from(&mlfq_queues[q])) != NULL) {
-                // Reset their tracked priority level to 0
-                queue_level[p->pid] = 0;
-                // Enqueue them into the highest priority queue
-                enqueue_process_to(&mlfq_queues[0], p);
+// Runs at every timer tick, but only when a multilevel algorithm is active: the
+// migration rules of its policy decide what actually happens (for MLQ, with its
+// null migration policy, nothing at all). Demotions only update queue_level:
+// the physical re-enqueue is done by _schedule_multilevel when it parks the
+// outgoing process, so a process is never linked into two queues at once
+static void _multilevel_on_tick() {
+    // Parameters (levels, quanta, migration rules) of the active algorithm
+    const MultilevelPolicy* policy = active_algorithm->ml_policy;
+
+    // Anti-Starvation Rule (periodic boost), only if the policy enables it
+    if (policy->boost_period > 0) {
+        // Increment the counter tracking time since the last priority boost
+        ml_ticks_since_boost++;
+        // If boost_period ticks have passed
+        if (ml_ticks_since_boost >= policy->boost_period) {
+            // Physically empty the lower priority queues and move everyone to level 0
+            for (int q = 1; q < policy->n_levels; q++) {
+                struct PCB* p;
+                // Dequeue until empty
+                while ((p = dequeue_process_from(&ml_queues[q])) != NULL) {
+                    // Reset their tracked priority level to 0
+                    queue_level[p->pid] = 0;
+                    // Enqueue them into the highest priority queue
+                    enqueue_process_to(&ml_queues[0], p);
+                }
             }
-        }
 
-        // Also reset the priority level tracking array for all processes (even blocked ones)
-        for (int i = 0; i < N_PROCESSES; i++) {
-            queue_level[i] = 0;
+            // Also reset the priority level tracking array for all processes (even blocked ones)
+            for (int i = 0; i < N_PROCESSES; i++) {
+                queue_level[i] = 0;
+            }
+            // Reset the boost timer
+            ml_ticks_since_boost = 0;
         }
-        // Reset the boost timer
-        mlfq_ticks_since_boost = 0;
     }
 
-    // Penalty (Demotion): if the current process has just exhausted its time slice
-    // without blocking, it is CPU-bound and gets demoted. The check on
-    // sched_lock_count mirrors the one in handle_timer_tick: while the scheduler
-    // is locked the process will keep running, so it must not be parked in a queue
-    if (current_process != &init_process && current_process->time_slice <= 0 && current_process->sched_lock_count == 0) {
-        // If it's not already in the lowest priority queue (Level 2)
-        if (queue_level[current_process->pid] < 2) {
-            // Demote it to the next lower queue level
-            queue_level[current_process->pid]++;
-        }
-        // Physically park the process in its new (or same, if already at bottom) queue
-        enqueue_process_to(&mlfq_queues[queue_level[current_process->pid]], current_process);
+    // Penalty (Demotion), only if the policy enables it: a process that exhausted
+    // its time slice without blocking is CPU-bound and slides one level down.
+    // The check on sched_lock_count mirrors the one in handle_timer_tick: while
+    // the scheduler is locked the process will keep running
+    if (policy->demote_on_expiry
+        && current_process != &init_process
+        && current_process->time_slice <= 0
+        && current_process->sched_lock_count == 0
+        // Do nothing if it is already in the lowest priority queue
+        && queue_level[current_process->pid] < policy->n_levels - 1) {
+        // Demote it to the next lower queue level (the re-enqueue at the new
+        // level happens in _schedule_multilevel, called right after this tick)
+        queue_level[current_process->pid]++;
     }
 }
 
@@ -621,19 +594,22 @@ const SchedAlgorithm sched_priority_aging = {
 };
 
 // --- MLQ: two fixed-priority queues (foreground/background), preemptive ---
+// Same engine as MLFQ, parametrized with a null migration policy
 const SchedAlgorithm sched_mlq = {
-    .enqueue = _enqueue_mlq,
-    .pick_next = _schedule_mlq,
-    .on_tick = NULL,
+    .enqueue = _enqueue_multilevel,
+    .pick_next = _schedule_multilevel,
+    .on_tick = _multilevel_on_tick,
     .is_preemptive = 1,
+    .ml_policy = &ml_policy_mlq,
 };
 
 // --- MLFQ: three feedback queues with demotion and periodic boost, preemptive ---
 const SchedAlgorithm sched_mlfq = {
-    .enqueue = _enqueue_mlfq,
-    .pick_next = _schedule_mlfq,
-    .on_tick = _mlfq_on_tick,
+    .enqueue = _enqueue_multilevel,
+    .pick_next = _schedule_multilevel,
+    .on_tick = _multilevel_on_tick,
     .is_preemptive = 1,
+    .ml_policy = &ml_policy_mlfq,
 };
 
 // =========================================================================
