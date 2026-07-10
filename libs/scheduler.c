@@ -99,7 +99,8 @@ struct PCB* dequeue_process_from(ProcessQueue* queue) {
     return process;
 }
 
-// Function to insert a process into a queue in a sorted manner based on priority
+// Function to insert a process into a queue kept sorted by the estimated length
+// of the next CPU burst (est_burst): ascending order for SJF, descending for LJF
 void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) {
     // Ignore NULL processes or the init process
     if (!process || process == &init_process) return;
@@ -108,19 +109,25 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
     // A process sitting in a ready queue is READY (see enqueue_process_to)
     process->state = PROCESS_READY;
 
+    // If the queue is empty, the new process becomes both head and tail (this
+    // case must be handled before dereferencing queue->head for the comparison)
+    if (queue->head == NULL) {
+        queue->head = process;
+        queue->tail = process;
+        return;
+    }
+
     // Determine if the new process should be placed at the very front of the queue
     // based on whether we are sorting ascending (SJF) or descending (LJF)
-    int goes_first = ascending ? (process->priority < queue->head->priority) 
-                               : (process->priority > queue->head->priority);
+    int goes_first = ascending ? (process->est_burst < queue->head->est_burst)
+                               : (process->est_burst > queue->head->est_burst);
 
-    // If the queue is empty or the new process has the highest/lowest priority
-    if (queue->head == NULL || goes_first) {
+    // If the new process has the shortest (SJF) / longest (LJF) estimated burst
+    if (goes_first) {
         // Point the new process's next to the current head
         process->next_ready = queue->head;
         // Update the queue's head to be the new process
         queue->head = process;
-        // If the queue was empty, the tail is also the new process
-        if (queue->tail == NULL) queue->tail = process;
         // Exit the function since insertion is complete
         return;
     }
@@ -131,9 +138,9 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
     int condition;
     // Traverse the queue to find the correct insertion spot
     while (current->next_ready != NULL) {
-        // Check if the new process priority fits the sorted order compared to the next node
-        condition = ascending ? (process->priority >= current->next_ready->priority) 
-                              : (process->priority <= current->next_ready->priority);
+        // Check if the new process estimate fits the sorted order compared to the next node
+        condition = ascending ? (process->est_burst >= current->next_ready->est_burst)
+                              : (process->est_burst <= current->next_ready->est_burst);
         // If the condition is false, we have found the insertion point
         if (!condition) break;
         // Move to the next process in the queue
@@ -163,7 +170,8 @@ static void _enqueue_fifo(struct PCB* process) {
 
 // --- SJF (Shortest Job First): insertion sorted by shortest job (ascending order) ---
 static void _enqueue_sjf(struct PCB* process) {
-    // Insert the process keeping the queue ordered, shortest at the head
+    // Insert the process keeping the queue ordered by the estimated length of
+    // the next CPU burst (est_burst), shortest at the head
     enqueue_sorted_to(&ready_queue, process, 1);
 }
 
@@ -623,6 +631,17 @@ void _schedule() {
 
 // Wrapper function to trigger a manual schedule (e.g., when a process yields or blocks)
 void schedule() {
+    // If the process is giving up the CPU because it blocked (or terminated), its
+    // CPU burst is over: update the estimate of the next burst with an exponential
+    // average, est_burst = alpha * measured + (1 - alpha) * est_burst, alpha = 0.5.
+    // A voluntary yield (state still RUNNING) does not end the burst
+    if (current_process != &init_process
+        && current_process->state != PROCESS_RUNNING
+        && current_process->state != PROCESS_READY) {
+        current_process->est_burst = (current_process->burst_ticks + current_process->est_burst) / 2;
+        // Reset the measurement for the next burst
+        current_process->burst_ticks = 0;
+    }
     // Force the current process's time slice to 0 so it gets preempted/re-evaluated
     current_process->time_slice = 0;
     // Call the master dispatcher
@@ -700,6 +719,9 @@ void schedule_tail(void) { sched_unlock(); }
 void handle_timer_tick() {
     // Decrement the residual time slice of the currently running process
     current_process->time_slice -= 1;
+    // Account the tick to the CPU burst the current process is consuming: the
+    // measurement feeds the est_burst estimate used by SJF/LJF (see schedule)
+    current_process->burst_ticks += 1;
 
     // Run the active algorithm's per-tick bookkeeping, if it has any
     // (currently only MLFQ does: periodic boost and demotions)

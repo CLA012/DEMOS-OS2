@@ -83,6 +83,14 @@ struct PCB {
   // Static priority: used by the priority aging algorithm to recharge time_slice
   // at the beginning of every epoch
   long priority;
+  // Estimated length of the next CPU burst, in timer ticks: it is the sorting key
+  // of the SJF/LJF ready queue. Every time the process blocks, the estimate is
+  // updated with an exponential average of the measured bursts:
+  // est_burst = alpha * measured + (1 - alpha) * est_burst, with alpha = 0.5
+  long est_burst;
+  // Timer ticks consumed so far in the current CPU burst (the measurement starts
+  // when the process receives the CPU and ends when it blocks)
+  long burst_ticks;
   // Scheduler lock nesting counter: while greater than 0 the timer tick will not
   // preempt this process (critical-section guard, see sched_lock/sched_unlock).
   // Not to be confused with the algorithm's preemption policy (is_preemptive)
@@ -117,7 +125,7 @@ struct PCB {
 // It goes back to this state every time it is re-enqueued
 #define PROCESS_READY 8
 
-#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
+#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
 // =========================================================================
 // SCHEDULING ALGORITHM DESCRIPTOR

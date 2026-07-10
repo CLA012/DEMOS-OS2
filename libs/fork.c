@@ -52,9 +52,13 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   // The new process is READY (runnable): it will become RUNNING only when the
   // scheduler dispatches it in switch_to_process
   new_process->state = PROCESS_READY;
-  new_process->time_slice = current_process->priority;
-
   new_process->time_slice = 10;
+
+  // The estimate of the child's next CPU burst is inherited from the parent: it
+  // is the best guess available until the child gets measured on its own bursts
+  new_process->est_burst = current_process->est_burst;
+  // No tick consumed yet in the current burst
+  new_process->burst_ticks = 0;
   
   // The child is born holding the scheduler lock: schedule_tail releases it
   // at the end of its first context switch
@@ -92,9 +96,6 @@ int move_to_user_mode(unsigned long start, unsigned long size, unsigned long pc)
 
   copy_code(current_process, (void*)start, size);
 
-  // Save the byte length of the Init process (e.g., arguments_test, shell, etc.)
-  current_process->priority = size;
-  
   set_pgd(current_process->mm.pgd);
   return 0;
 }
