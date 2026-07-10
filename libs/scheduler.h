@@ -152,7 +152,7 @@ typedef struct {
   // Optional per-tick bookkeeping (e.g. MLFQ promotions/demotions); NULL if unused
   void (*on_tick)(void);
   // If 0 the timer tick never forces a context switch: the running process keeps
-  // the CPU until it blocks, yields or exits (FCFS, SJF)
+  // the CPU until it blocks, yields or exits (FCFS, SJF, LJF)
   int is_preemptive;
 } SchedAlgorithm;
 
@@ -160,6 +160,7 @@ typedef struct {
 extern const SchedAlgorithm sched_round_robin;
 extern const SchedAlgorithm sched_fcfs;
 extern const SchedAlgorithm sched_sjf;
+extern const SchedAlgorithm sched_ljf;
 extern const SchedAlgorithm sched_priority_aging;
 extern const SchedAlgorithm sched_mlq;
 extern const SchedAlgorithm sched_mlfq;

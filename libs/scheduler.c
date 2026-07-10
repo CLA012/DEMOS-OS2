@@ -45,9 +45,10 @@ static int queue_level[N_PROCESSES] = {0};
 // =========================================================================
 // To change the scheduling algorithm, point active_algorithm to one of the
 // descriptors declared in scheduler.h and defined at the bottom of this file:
-// sched_round_robin, sched_fcfs, sched_sjf, sched_priority_aging, sched_mlq,
-// sched_mlfq. Nothing else needs to be touched: insertion policy, selection
-// policy, per-tick bookkeeping and preemptiveness are all part of the descriptor
+// sched_round_robin, sched_fcfs, sched_sjf, sched_ljf, sched_priority_aging,
+// sched_mlq, sched_mlfq. Nothing else needs to be touched: insertion policy,
+// selection policy, per-tick bookkeeping and preemptiveness are all part of
+// the descriptor
 static const SchedAlgorithm* active_algorithm = &sched_round_robin;
 
 // =========================================================================
@@ -173,6 +174,13 @@ static void _enqueue_sjf(struct PCB* process) {
     // Insert the process keeping the queue ordered by the estimated length of
     // the next CPU burst (est_burst), shortest at the head
     enqueue_sorted_to(&ready_queue, process, 1);
+}
+
+// --- LJF (Longest Job First): insertion sorted by longest job (descending order) ---
+static void _enqueue_ljf(struct PCB* process) {
+    // Insert the process keeping the queue ordered by the estimated length of
+    // the next CPU burst (est_burst), longest at the head
+    enqueue_sorted_to(&ready_queue, process, 0);
 }
 
 // --- Priority aging: NO enqueueing ---
@@ -370,7 +378,7 @@ void _schedule_round_robin() {
     sched_unlock();
 }
 
-// Shared selection function for the non-preemptive algorithms (FCFS, SJF):
+// Shared selection function for the non-preemptive algorithms (FCFS, SJF, LJF):
 // their difference lives entirely in the enqueue callback (FIFO vs. sorted), so
 // picking always means "take the head of the ready queue". These algorithms have
 // is_preemptive = 0 in their descriptor, therefore the timer tick never calls
@@ -596,6 +604,14 @@ const SchedAlgorithm sched_sjf = {
     .is_preemptive = 0,
 };
 
+// --- LJF: ready queue sorted by longest job, non-preemptive ---
+const SchedAlgorithm sched_ljf = {
+    .enqueue = _enqueue_ljf,
+    .pick_next = _schedule_queue_head,
+    .on_tick = NULL,
+    .is_preemptive = 0,
+};
+
 // --- Priority with aging: no queues, scans processes[], preemptive ---
 const SchedAlgorithm sched_priority_aging = {
     .enqueue = _enqueue_priority_aging,
@@ -736,8 +752,8 @@ void handle_timer_tick() {
     // Safety catch: ensure the time slice doesn't go negative
     current_process->time_slice = 0;
 
-    // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
-    // current process keeps the CPU until it blocks, yields or exits, so the
+    // Non-preemptive algorithms (FCFS, SJF, LJF) never switch on a timer tick:
+    // the current process keeps the CPU until it blocks, yields or exits, so the
     // dispatcher must not even be called here
     if (!active_algorithm->is_preemptive) return;
 
