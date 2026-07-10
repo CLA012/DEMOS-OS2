@@ -36,9 +36,19 @@ static ProcessQueue ready_queue = QUEUE_INIT;
 // Define an array of 2 queues for Multilevel Queue (MLQ: 0=Foreground, 1=Background)
 static ProcessQueue mlq_queues[2] = {QUEUE_INIT, QUEUE_INIT};              
 // Define an array of 3 queues for Multilevel Feedback Queue (MLFQ)
-static ProcessQueue mlfq_queues[3] = {QUEUE_INIT, QUEUE_INIT, QUEUE_INIT}; 
+static ProcessQueue mlfq_queues[3] = {QUEUE_INIT, QUEUE_INIT, QUEUE_INIT};
 // Array to track the current MLFQ queue level (priority) for each process by its PID
-static int queue_level[N_PROCESSES] = {0};                                 
+static int queue_level[N_PROCESSES] = {0};
+
+// =========================================================================
+// ACTIVE ALGORITHM SELECTION (single configuration point)
+// =========================================================================
+// To change the scheduling algorithm, point active_algorithm to one of the
+// descriptors declared in scheduler.h and defined at the bottom of this file:
+// sched_round_robin, sched_fcfs, sched_sjf, sched_priority_aging, sched_mlq,
+// sched_mlfq. Nothing else needs to be touched: insertion policy, selection
+// policy, per-tick bookkeeping and preemptiveness are all part of the descriptor
+static const SchedAlgorithm* active_algorithm = &sched_round_robin;
 
 // =========================================================================
 // QUEUE OPERATIONS (O(1) Complexity)
@@ -137,36 +147,56 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
 }
 
 // =========================================================================
-// INSERTION ROUTER (Called by fork.c, syscalls, and signal handlers)
+// INSERTION POLICIES (the enqueue callback of each algorithm descriptor)
 // =========================================================================
-// Centralized function to enqueue a process into the appropriate queue based on the active algorithm
-void enqueue_process(struct PCB* process) {
-    // Ignore NULL processes or the init process
-    if (!process || process == &init_process) return;
 
-    // --- Standard algorithms: Round Robin, FCFS ---
+// --- Round Robin / FCFS: plain FIFO insertion at the tail of the ready queue ---
+static void _enqueue_fifo(struct PCB* process) {
     // Enqueue the process at the end of the standard ready queue
-     enqueue_process_to(&ready_queue, process);
+    enqueue_process_to(&ready_queue, process);
+}
 
-    // --- SJF (Shortest Job First) ---
-    // Insert the process sorted by shortest priority (ascending order)
-    // enqueue_sorted_to(&ready_queue, process, 1);
+// --- SJF (Shortest Job First): insertion sorted by shortest job (ascending order) ---
+static void _enqueue_sjf(struct PCB* process) {
+    // Insert the process keeping the queue ordered, shortest at the head
+    enqueue_sorted_to(&ready_queue, process, 1);
+}
 
-    // --- LJF (Longest Job First) ---
-    // Insert the process sorted by longest priority (descending order)
-    // enqueue_sorted_to(&ready_queue, process, 0);
+// --- Priority aging: NO enqueueing ---
+// The priority aging algorithm does not use ready queues at all:
+// _schedule_priority_aging scans the whole processes[] array at every decision,
+// so a process that becomes ready does not need to be inserted anywhere.
+// This explicitly empty callback documents that choice
+static void _enqueue_priority_aging(struct PCB* process) {
+    // Nothing to do: the process is selectable just by being in processes[]
+    (void)process;
+}
 
-    // --- MLQ (Multilevel Queue) ---
-    /*
+// --- MLQ (Multilevel Queue): fixed queue chosen by PID parity ---
+static void _enqueue_mlq(struct PCB* process) {
     // If the PID is odd, put it in the foreground queue (index 0)
     if (process->pid % 2 != 0) enqueue_process_to(&mlq_queues[0], process);
     // If the PID is even, put it in the background queue (index 1)
     else enqueue_process_to(&mlq_queues[1], process);
-    */
+}
 
-    // --- MLFQ (Multilevel Feedback Queue) - Active by default for the Demo ---
+// --- MLFQ (Multilevel Feedback Queue): queue matching the process's current level ---
+static void _enqueue_mlfq(struct PCB* process) {
     // Enqueue the process into the specific MLFQ queue corresponding to its current priority level
-   // enqueue_process_to(&mlfq_queues[queue_level[process->pid]], process);
+    enqueue_process_to(&mlfq_queues[queue_level[process->pid]], process);
+}
+
+// =========================================================================
+// INSERTION ROUTER (Called by fork.c, syscalls, and signal handlers)
+// =========================================================================
+// Centralized function to enqueue a process that became ready: it simply
+// delegates to the insertion policy of the active algorithm
+void enqueue_process(struct PCB* process) {
+    // Ignore NULL processes or the init process
+    if (!process || process == &init_process) return;
+
+    // Delegate to the active algorithm's insertion policy
+    active_algorithm->enqueue(process);
 }
 
 // =========================================================================
@@ -302,16 +332,21 @@ void _schedule_round_robin() {
     preempt_enable();
 }
 
-// First-Come, First-Served scheduling algorithm implementation
-void _schedule_fcfs() {
+// Shared selection function for the non-preemptive algorithms (FCFS, SJF):
+// their difference lives entirely in the enqueue callback (FIFO vs. sorted), so
+// picking always means "take the head of the ready queue". These algorithms have
+// is_preemptive = 0 in their descriptor, therefore the timer tick never calls
+// this function: it only runs when the current process blocks, yields or exits.
+// This replaces the two identical _schedule_fcfs/_schedule_sjf functions and
+// their misleading early-return on a still-running current process
+void _schedule_queue_head() {
     // Disable preemption during the scheduling decision
     preempt_disable();
 
-    // FCFS is Non-Preemptive. If a valid user process is currently running...
+    // If the current process yielded voluntarily but is still runnable, put it
+    // back in the ready queue according to the algorithm's insertion policy
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
-        // ...re-enable preemption and exit immediately (do not switch)
-        preempt_enable();
-        return; 
+        active_algorithm->enqueue(current_process);
     }
 
     // Initialize pointer for the next process
@@ -328,37 +363,6 @@ void _schedule_fcfs() {
     if (next_process == NULL) next_process = &init_process;
 
     // Perform context switch if we are changing processes
-    if (current_process != next_process) switch_to_process(next_process);
-    // Re-enable preemption
-    preempt_enable();
-}
-
-// Shortest Job First scheduling algorithm implementation
-void _schedule_sjf() {
-    // Disable preemption during the scheduling decision
-    preempt_disable();
-
-    // Non-preemptive behavior: do not interrupt the currently running process
-    if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
-        // Re-enable preemption and exit
-        preempt_enable();
-        return; 
-    }
-
-    // Initialize pointer for the next process
-    struct PCB* next_process = NULL;
-    // The shortest job is already at the head of the queue due to enqueue_sorted_to
-    while ((next_process = dequeue_process_from(&ready_queue)) != NULL) {
-        // Handle pending signals
-        handle_process_signals(next_process);
-        // If it's ready to run, break the loop
-        if (next_process->state == PROCESS_RUNNING) break;
-    }
-
-    // Fallback to init process if queue is empty
-    if (next_process == NULL) next_process = &init_process;
-
-    // Switch context to the new process
     if (current_process != next_process) switch_to_process(next_process);
     // Re-enable preemption
     preempt_enable();
@@ -477,22 +481,114 @@ void _schedule_mlfq() {
 }
 
 // =========================================================================
+// MLFQ PER-TICK BOOKKEEPING (the on_tick callback of sched_mlfq)
+// =========================================================================
+// Static variable to count hardware timer ticks for the MLFQ boost mechanism
+static int mlfq_ticks_since_boost = 0;
+
+// Runs at every timer tick, but only when MLFQ is the active algorithm: it is
+// registered as the on_tick callback of the sched_mlfq descriptor, so no other
+// algorithm ever executes it (the queues are intrusive lists sharing the PCB's
+// next_ready pointer: feeding mlfq_queues while e.g. Round Robin uses
+// ready_queue would corrupt both lists)
+static void _mlfq_on_tick() {
+    // Increment the counter tracking time since the last MLFQ priority boost
+    mlfq_ticks_since_boost++;
+    // Anti-Starvation Rule: If 1000 ticks have passed
+    if (mlfq_ticks_since_boost >= 1000) {
+        // Physically empty the lower priority queues (1 and 2) and move everyone to queue 0
+        for (int q = 1; q < 3; q++) {
+            struct PCB* p;
+            // Dequeue until empty
+            while ((p = dequeue_process_from(&mlfq_queues[q])) != NULL) {
+                // Reset their tracked priority level to 0
+                queue_level[p->pid] = 0;
+                // Enqueue them into the highest priority queue
+                enqueue_process_to(&mlfq_queues[0], p);
+            }
+        }
+
+        // Also reset the priority level tracking array for all processes (even blocked ones)
+        for (int i = 0; i < N_PROCESSES; i++) {
+            queue_level[i] = 0;
+        }
+        // Reset the boost timer
+        mlfq_ticks_since_boost = 0;
+    }
+
+    // Penalty (Demotion): if the current process has just exhausted its time slice
+    // without blocking, it is CPU-bound and gets demoted. The check on
+    // preempt_disabled mirrors the one in handle_timer_tick: while preemption is
+    // disabled the process will keep running, so it must not be parked in a queue
+    if (current_process != &init_process && current_process->counter <= 0 && current_process->preempt_disabled == 0) {
+        // If it's not already in the lowest priority queue (Level 2)
+        if (queue_level[current_process->pid] < 2) {
+            // Demote it to the next lower queue level
+            queue_level[current_process->pid]++;
+        }
+        // Physically park the process in its new (or same, if already at bottom) queue
+        enqueue_process_to(&mlfq_queues[queue_level[current_process->pid]], current_process);
+    }
+}
+
+// =========================================================================
+// ALGORITHM DESCRIPTORS
+// =========================================================================
+// --- Round Robin: FIFO ready queue, preemptive with fixed time quantum ---
+const SchedAlgorithm sched_round_robin = {
+    .enqueue = _enqueue_fifo,
+    .pick_next = _schedule_round_robin,
+    .on_tick = NULL,
+    .is_preemptive = 1,
+};
+
+// --- FCFS: FIFO ready queue, non-preemptive (runs until block/yield/exit) ---
+const SchedAlgorithm sched_fcfs = {
+    .enqueue = _enqueue_fifo,
+    .pick_next = _schedule_queue_head,
+    .on_tick = NULL,
+    .is_preemptive = 0,
+};
+
+// --- SJF: ready queue sorted by shortest job, non-preemptive ---
+const SchedAlgorithm sched_sjf = {
+    .enqueue = _enqueue_sjf,
+    .pick_next = _schedule_queue_head,
+    .on_tick = NULL,
+    .is_preemptive = 0,
+};
+
+// --- Priority with aging: no queues, scans processes[], preemptive ---
+const SchedAlgorithm sched_priority_aging = {
+    .enqueue = _enqueue_priority_aging,
+    .pick_next = _schedule_priority_aging,
+    .on_tick = NULL,
+    .is_preemptive = 1,
+};
+
+// --- MLQ: two fixed-priority queues (foreground/background), preemptive ---
+const SchedAlgorithm sched_mlq = {
+    .enqueue = _enqueue_mlq,
+    .pick_next = _schedule_mlq,
+    .on_tick = NULL,
+    .is_preemptive = 1,
+};
+
+// --- MLFQ: three feedback queues with demotion and periodic boost, preemptive ---
+const SchedAlgorithm sched_mlfq = {
+    .enqueue = _enqueue_mlfq,
+    .pick_next = _schedule_mlfq,
+    .on_tick = _mlfq_on_tick,
+    .is_preemptive = 1,
+};
+
+// =========================================================================
 // CENTRAL DISPATCHER
 // =========================================================================
-// Master scheduling function that routes to the specific algorithm implementation
+// Master scheduling function: delegates the decision to the active algorithm
+// (see the ACTIVE ALGORITHM SELECTION section at the top of this file)
 void _schedule() {
-    // --- Preemptive Algorithms ---
-    //_schedule_priority_aging();
-     _schedule_round_robin();
-    // _schedule_lottery();
-
-    // --- Advanced / Mixed Algorithms ---
-    // _schedule_mlq();
-    // _schedule_mlfq(); 
-    // --- Non-Preemptive Algorithms ---
-    // _schedule_fcfs();
-    // _schedule_sjf();
-    // _schedule_ljf();
+    active_algorithm->pick_next();
 }
 
 // Wrapper function to trigger a manual schedule (e.g., when a process yields or blocks)
@@ -555,69 +651,30 @@ void switch_to_process(struct PCB *next_process) {
 void schedule_tail(void) { preempt_enable(); }
 
 // =========================================================================
-// TIMER TICK: MANAGES MLFQ DYNAMICS (Promotions / Demotions)
+// TIMER TICK
 // =========================================================================
-// Static variable to count hardware timer ticks for the MLFQ boost mechanism
-static int mlfq_ticks_since_boost = 0;
-// Flag set to 1 only when MLFQ is the active algorithm (must match the choices made
-// in enqueue_process and _schedule). The MLFQ bookkeeping in handle_timer_tick must
-// NOT run for the other algorithms: all the queues are intrusive lists sharing the
-// same next_ready pointer in the PCB, so parking the current process in mlfq_queues
-// while e.g. Round Robin also links it into ready_queue corrupts both lists.
-static const int mlfq_is_active = 0;
-
 // Function called by the hardware timer interrupt handler at regular intervals
 void handle_timer_tick() {
     // Decrement the time slice counter of the currently running process
     current_process->counter -= 1;
 
-    // MLFQ bookkeeping (periodic boost): runs only when MLFQ is the active algorithm
-    if (mlfq_is_active) {
-        // Increment the counter tracking time since the last MLFQ priority boost
-        mlfq_ticks_since_boost++;
-        // Anti-Starvation Rule: If 1000 ticks have passed
-        if (mlfq_ticks_since_boost >= 1000) {
-            // Physically empty the lower priority queues (1 and 2) and move everyone to queue 0
-            for (int q = 1; q < 3; q++) {
-                struct PCB* p;
-                // Dequeue until empty
-                while ((p = dequeue_process_from(&mlfq_queues[q])) != NULL) {
-                    // Reset their tracked priority level to 0
-                    queue_level[p->pid] = 0;
-                    // Enqueue them into the highest priority queue
-                    enqueue_process_to(&mlfq_queues[0], p);
-                }
-            }
-
-            // Also reset the priority level tracking array for all processes (even blocked ones)
-            for (int i = 0; i < N_PROCESSES; i++) {
-                queue_level[i] = 0;
-            }
-            // Reset the boost timer
-            mlfq_ticks_since_boost = 0;
-        }
-    }
+    // Run the active algorithm's per-tick bookkeeping, if it has any
+    // (currently only MLFQ does: periodic boost and demotions)
+    if (active_algorithm->on_tick) active_algorithm->on_tick();
 
     // If the current process still has time left OR preemption is explicitly disabled
     if (current_process->counter > 0 || current_process->preempt_disabled > 0) {
         // Return immediately, allowing the process to continue running
-        return; 
+        return;
     }
-    
+
     // Safety catch: ensure counter doesn't go negative
     current_process->counter = 0;
 
-    // Penalty (Demotion): If the process exhausted its time slice without doing I/O.
-    // This too is MLFQ-specific and must not run when another algorithm is active
-    if (mlfq_is_active && current_process != &init_process) {
-        // If it's not already in the lowest priority queue (Level 2)
-        if (queue_level[current_process->pid] < 2) {
-            // Demote it to the next lower queue level
-            queue_level[current_process->pid]++;
-        }
-        // Physically park the process in its new (or same, if already at bottom) queue
-        enqueue_process_to(&mlfq_queues[queue_level[current_process->pid]], current_process);
-    }
+    // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
+    // current process keeps the CPU until it blocks, yields or exits, so the
+    // dispatcher must not even be called here
+    if (!active_algorithm->is_preemptive) return;
 
     // Re-enable hardware interrupts before calling the scheduler
     enable_irq();

@@ -103,6 +103,34 @@ struct PCB {
 
 #define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
+// =========================================================================
+// SCHEDULING ALGORITHM DESCRIPTOR
+// =========================================================================
+// Every scheduling algorithm is described by a table of function pointers, so that
+// all its algorithm-specific behaviour lives behind a single interface.
+// Switching algorithm only requires changing which descriptor the pointer
+// active_algorithm (in scheduler.c) refers to: insertion policy, selection policy,
+// per-tick bookkeeping and preemptiveness all follow automatically.
+typedef struct {
+  // Inserts a process that became ready into the algorithm's ready structure(s)
+  void (*enqueue)(struct PCB* process);
+  // Selects the next process to run and performs the context switch
+  void (*pick_next)(void);
+  // Optional per-tick bookkeeping (e.g. MLFQ promotions/demotions); NULL if unused
+  void (*on_tick)(void);
+  // If 0 the timer tick never forces a context switch: the running process keeps
+  // the CPU until it blocks, yields or exits (FCFS, SJF)
+  int is_preemptive;
+} SchedAlgorithm;
+
+// Descriptors for all the available scheduling algorithms (defined in scheduler.c)
+extern const SchedAlgorithm sched_round_robin;
+extern const SchedAlgorithm sched_fcfs;
+extern const SchedAlgorithm sched_sjf;
+extern const SchedAlgorithm sched_priority_aging;
+extern const SchedAlgorithm sched_mlq;
+extern const SchedAlgorithm sched_mlfq;
+
 extern struct PCB *current_process;
 extern struct PCB *processes[N_PROCESSES];
 extern int n_processes;
