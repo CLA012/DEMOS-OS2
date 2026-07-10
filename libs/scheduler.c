@@ -551,34 +551,43 @@ void schedule_tail(void) { preempt_enable(); }
 // =========================================================================
 // Static variable to count hardware timer ticks for the MLFQ boost mechanism
 static int mlfq_ticks_since_boost = 0;
+// Flag set to 1 only when MLFQ is the active algorithm (must match the choices made
+// in enqueue_process and _schedule). The MLFQ bookkeeping in handle_timer_tick must
+// NOT run for the other algorithms: all the queues are intrusive lists sharing the
+// same next_ready pointer in the PCB, so parking the current process in mlfq_queues
+// while e.g. Round Robin also links it into ready_queue corrupts both lists.
+static const int mlfq_is_active = 0;
 
 // Function called by the hardware timer interrupt handler at regular intervals
 void handle_timer_tick() {
     // Decrement the time slice counter of the currently running process
     current_process->counter -= 1;
 
-    // Increment the counter tracking time since the last MLFQ priority boost
-    mlfq_ticks_since_boost++;
-    // Anti-Starvation Rule: If 1000 ticks have passed
-    if (mlfq_ticks_since_boost >= 1000) {
-        // Physically empty the lower priority queues (1 and 2) and move everyone to queue 0
-        for (int q = 1; q < 3; q++) {
-            struct PCB* p;
-            // Dequeue until empty
-            while ((p = dequeue_process_from(&mlfq_queues[q])) != NULL) {
-                // Reset their tracked priority level to 0
-                queue_level[p->pid] = 0;
-                // Enqueue them into the highest priority queue
-                enqueue_process_to(&mlfq_queues[0], p);
+    // MLFQ bookkeeping (periodic boost): runs only when MLFQ is the active algorithm
+    if (mlfq_is_active) {
+        // Increment the counter tracking time since the last MLFQ priority boost
+        mlfq_ticks_since_boost++;
+        // Anti-Starvation Rule: If 1000 ticks have passed
+        if (mlfq_ticks_since_boost >= 1000) {
+            // Physically empty the lower priority queues (1 and 2) and move everyone to queue 0
+            for (int q = 1; q < 3; q++) {
+                struct PCB* p;
+                // Dequeue until empty
+                while ((p = dequeue_process_from(&mlfq_queues[q])) != NULL) {
+                    // Reset their tracked priority level to 0
+                    queue_level[p->pid] = 0;
+                    // Enqueue them into the highest priority queue
+                    enqueue_process_to(&mlfq_queues[0], p);
+                }
             }
+
+            // Also reset the priority level tracking array for all processes (even blocked ones)
+            for (int i = 0; i < N_PROCESSES; i++) {
+                queue_level[i] = 0;
+            }
+            // Reset the boost timer
+            mlfq_ticks_since_boost = 0;
         }
-        
-        // Also reset the priority level tracking array for all processes (even blocked ones)
-        for (int i = 0; i < N_PROCESSES; i++) {
-            queue_level[i] = 0; 
-        }
-        // Reset the boost timer
-        mlfq_ticks_since_boost = 0;
     }
 
     // If the current process still has time left OR preemption is explicitly disabled
@@ -590,8 +599,9 @@ void handle_timer_tick() {
     // Safety catch: ensure counter doesn't go negative
     current_process->counter = 0;
 
-    // Penalty (Demotion): If the process exhausted its time slice without doing I/O
-    if (current_process != &init_process) {
+    // Penalty (Demotion): If the process exhausted its time slice without doing I/O.
+    // This too is MLFQ-specific and must not run when another algorithm is active
+    if (mlfq_is_active && current_process != &init_process) {
         // If it's not already in the lowest priority queue (Level 2)
         if (queue_level[current_process->pid] < 2) {
             // Demote it to the next lower queue level
