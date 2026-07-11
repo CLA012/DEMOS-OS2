@@ -103,9 +103,11 @@ process. Its informations are:
 
 - `CPU context`: values of the CPU registers
 - `state` (`RUNNING`, `WAITING`...)
-- `counter`: the priority of the process in the current time
-- `priority`: it is used to calculate the counter
-- `preempt_disabled`: if `true`, the process won't be preempted
+- `time_slice`: the residual time slice of the process; with the priority aging 
+algorithm it also acts as its dynamic priority
+- `priority`: it is used to recharge the `time_slice`
+- `sched_lock_count`: while greater than zero the process holds the scheduler 
+lock and won't be preempted
 - `pid`: the identificator
 - `stack`: the pointer
 - `flags`: the flags with which the process has been cloned from its father
@@ -134,16 +136,17 @@ and the whole virtual memory of the current process is copied into the new one.
 ### Scheduler
 
 The scheduler can be invoked from the kernel with the `_schedule()` function. 
-This function puts the counter of the current process to zero and search for the
-next process to be executed, which will be the one with the higher counter from 
-the list of the active processes. 
+This function puts the time slice of the current process to zero and search for 
+the next process to be executed, which (with the priority aging algorithm) will 
+be the one with the higher residual time slice from the list of the active 
+processes. 
 
 The scheduler is also automatically invoked everytime the system timer ticks: 
 when this happens, the CPU generates an IRQ that is handled by the 
-`handle_timer_tick` function. This function sets the current process counter to 
--1 and invokes the `_schedule()` function to find the new process to run. This 
-operation won't be executed if the current process has disabled the preempt, so
-if the `preempt_disable` attribute of its PCB is `true`. 
+`handle_timer_tick` function. This function decrements the current process time 
+slice and invokes the `_schedule()` function to find the new process to run. This 
+operation won't be executed if the current process holds the scheduler lock, so
+if the `sched_lock_count` attribute of its PCB is greater than zero. 
 
 ### Memory management
 

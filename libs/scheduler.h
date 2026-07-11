@@ -74,9 +74,32 @@ struct MessagesCircularBuffer {
 struct PCB {
   struct cpu_context cpu_context;
   long state;
-  long counter;
+  // Residual time slice in timer ticks: recharged by the scheduling algorithm
+  // when the process is dispatched and decremented at every timer tick; when it
+  // reaches 0 the process can be preempted. For the priority aging algorithm it
+  // doubles as the DYNAMIC priority of the process (historic Linux epoch scheme,
+  // see _schedule_priority_aging in scheduler.c)
+  long time_slice;
+  // Static priority: used by the priority aging algorithm to recharge time_slice
+  // at the beginning of every epoch
   long priority;
-  int preempt_disabled;
+  // Estimated length of the next CPU burst, in timer ticks: it is the sorting key
+  // of the SJF/LJF ready queue. Every time the process blocks, the estimate is
+  // updated with an exponential average of the measured bursts:
+  // est_burst = alpha * measured + (1 - alpha) * est_burst, with alpha = 0.5
+  long est_burst;
+  // Timer ticks consumed so far in the current CPU burst (the measurement starts
+  // when the process receives the CPU and ends when it blocks)
+  long burst_ticks;
+  // Multilevel queue class (QUEUE_CLASS_FOREGROUND / QUEUE_CLASS_BACKGROUND):
+  // chosen at process creation (the child inherits the parent's class) and used
+  // by MLQ to pick the fixed queue. It replaces the old PID-parity criterion,
+  // which gave the user no control since PIDs are assigned automatically
+  int queue_class;
+  // Scheduler lock nesting counter: while greater than 0 the timer tick will not
+  // preempt this process (critical-section guard, see sched_lock/sched_unlock).
+  // Not to be confused with the algorithm's preemption policy (is_preemptive)
+  int sched_lock_count;
   long pid;
 
   unsigned long flags;
@@ -93,6 +116,8 @@ struct PCB {
   struct PCB* next_ready;
 };
 
+// The process currently owning the CPU: at most one process is in this state at
+// any time, and the transition to it happens only inside switch_to_process
 #define PROCESS_RUNNING 1
 #define PROCESS_ZOMBIE 2
 #define PROCESS_WAITING_UART_INPUT 3
@@ -100,15 +125,80 @@ struct PCB {
 #define PROCESS_WAITING_TO_SEND_MESSAGE 5
 #define PROCESS_WAITING_ANOTHER_PROCESS 6
 #define PROCESS_STOPPED 7
+// The process is runnable but does NOT have the CPU: it sits in a ready queue
+// (or, for priority aging, simply in processes[]) waiting to be dispatched.
+// It goes back to this state every time it is re-enqueued
+#define PROCESS_READY 8
 
-#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
+// Classes for the multilevel queue algorithms (field queue_class of the PCB)
+#define QUEUE_CLASS_FOREGROUND 0
+#define QUEUE_CLASS_BACKGROUND 1
+
+#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, QUEUE_CLASS_FOREGROUND, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
+
+// =========================================================================
+// MULTILEVEL QUEUE POLICY
+// =========================================================================
+// MLQ and MLFQ share a single implementation: an array of priority queues
+// scanned from level 0 (highest priority) downwards. What distinguishes them is
+// only this set of parameters: number of levels, time quantum per level and the
+// migration rules. MLQ is the degenerate case with a null migration policy:
+// every process stays forever in the queue chosen by its queue_class.
+#define ML_MAX_LEVELS 3
+typedef struct {
+  // Number of priority levels actually used (at most ML_MAX_LEVELS)
+  int n_levels;
+  // Time quantum in ticks assigned when a process is picked from each level
+  long quantum[ML_MAX_LEVELS];
+  // Migration rule: if 1, a process that exhausts its quantum is demoted to the
+  // next lower level (MLFQ); if 0 it stays at its level forever (MLQ)
+  int demote_on_expiry;
+  // Migration rule: if > 0, every boost_period ticks all processes are moved
+  // back to level 0 to prevent starvation (MLFQ); 0 disables the boost (MLQ)
+  int boost_period;
+} MultilevelPolicy;
+
+// =========================================================================
+// SCHEDULING ALGORITHM DESCRIPTOR
+// =========================================================================
+// Every scheduling algorithm is described by a table of function pointers, so that
+// all its algorithm-specific behaviour lives behind a single interface.
+// Switching algorithm only requires changing which descriptor the pointer
+// active_algorithm (in scheduler.c) refers to: insertion policy, selection policy,
+// per-tick bookkeeping and preemptiveness all follow automatically.
+typedef struct {
+  // Inserts a process that became ready into the algorithm's ready structure(s)
+  void (*enqueue)(struct PCB* process);
+  // Selects the next process to run and performs the context switch
+  void (*pick_next)(void);
+  // Optional per-tick bookkeeping (multilevel promotions/demotions); NULL if unused
+  void (*on_tick)(void);
+  // If 0 the timer tick never forces a context switch: the running process keeps
+  // the CPU until it blocks, yields or exits (FCFS, SJF, LJF)
+  int is_preemptive;
+  // Parameters of the multilevel queue engine (only for MLQ/MLFQ, else NULL)
+  const MultilevelPolicy* ml_policy;
+} SchedAlgorithm;
+
+// Descriptors for all the available scheduling algorithms (defined in scheduler.c)
+extern const SchedAlgorithm sched_round_robin;
+extern const SchedAlgorithm sched_fcfs;
+extern const SchedAlgorithm sched_sjf;
+extern const SchedAlgorithm sched_ljf;
+extern const SchedAlgorithm sched_priority_aging;
+extern const SchedAlgorithm sched_mlq;
+extern const SchedAlgorithm sched_mlfq;
 
 extern struct PCB *current_process;
 extern struct PCB *processes[N_PROCESSES];
 extern int n_processes;
 
-extern void preempt_enable();
-extern void preempt_disable();
+// Critical-section guard of the scheduler: code between sched_lock() and
+// sched_unlock() cannot be preempted by the timer tick. This is a protection
+// for the scheduler's data structures, NOT the preemption policy of the
+// scheduling algorithm (which is the is_preemptive field of the descriptor)
+extern void sched_unlock();
+extern void sched_lock();
 extern void schedule();
 extern void switch_to_process(struct PCB *);
 extern void handle_timer_tick();
