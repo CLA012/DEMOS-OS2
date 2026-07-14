@@ -96,6 +96,11 @@ struct PCB {
   // by MLQ to pick the fixed queue. It replaces the old PID-parity criterion,
   // which gave the user no control since PIDs are assigned automatically
   int queue_class;
+  // Lottery scheduling tickets (OSTEP, chap. 9 "Proportional Share"): at every
+  // scheduling decision a winning ticket is drawn, so the expected CPU share of
+  // a process is tickets / total tickets of the runnable processes. Chosen at
+  // creation: the child inherits the parent's tickets (default 10)
+  long tickets;
   // Scheduler lock nesting counter: while greater than 0 the timer tick will not
   // preempt this process (critical-section guard, see sched_lock/sched_unlock).
   // Not to be confused with the algorithm's preemption policy (is_preemptive)
@@ -134,7 +139,7 @@ struct PCB {
 #define QUEUE_CLASS_FOREGROUND 0
 #define QUEUE_CLASS_BACKGROUND 1
 
-#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, QUEUE_CLASS_FOREGROUND, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
+#define INIT_PROCESS {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 1, 1, 0, 0, QUEUE_CLASS_FOREGROUND, 10, 0, 0, 0, {}, {0, 0, {}, 0, {}}, {}, 0, -1, NULL}
 
 // =========================================================================
 // MULTILEVEL QUEUE POLICY
@@ -185,6 +190,7 @@ extern const SchedAlgorithm sched_round_robin;
 extern const SchedAlgorithm sched_fcfs;
 extern const SchedAlgorithm sched_sjf;
 extern const SchedAlgorithm sched_ljf;
+extern const SchedAlgorithm sched_lottery;
 extern const SchedAlgorithm sched_priority_aging;
 extern const SchedAlgorithm sched_mlq;
 extern const SchedAlgorithm sched_mlfq;
