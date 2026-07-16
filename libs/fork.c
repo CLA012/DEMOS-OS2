@@ -64,6 +64,11 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   // parent's class (the init process is FOREGROUND, so that is the default).
   // It can be changed on the PCB before the process is first enqueued
   new_process->queue_class = current_process->queue_class;
+
+  // Lottery tickets are inherited from the parent as well (OSTEP chap. 9): the
+  // default is the 10 tickets of the init process, and the field can be changed
+  // on the PCB to give a process a larger or smaller CPU share
+  new_process->tickets = current_process->tickets;
   
   // The child is born holding the scheduler lock: schedule_tail releases it
   // at the end of its first context switch

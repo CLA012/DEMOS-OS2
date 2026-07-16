@@ -6,6 +6,9 @@
 #include "mm.h"
 // Include the header for process creation (fork) functionalities
 #include "fork.h"
+// Include the header for memory-mapped IO (the lottery scheduler reads the
+// free-running system timer to seed its random number generator)
+#include "../arch/mmio.h"
 
 // Initialize the init process (the idle task) using a predefined macro
 static struct PCB init_process = INIT_PROCESS;
@@ -63,10 +66,10 @@ static const MultilevelPolicy ml_policy_mlfq = {
 // =========================================================================
 // To change the scheduling algorithm, point active_algorithm to one of the
 // descriptors declared in scheduler.h and defined at the bottom of this file:
-// sched_round_robin, sched_fcfs, sched_sjf, sched_ljf, sched_priority_aging,
-// sched_mlq, sched_mlfq. Nothing else needs to be touched: insertion policy,
-// selection policy, per-tick bookkeeping and preemptiveness are all part of
-// the descriptor
+// sched_round_robin, sched_fcfs, sched_sjf, sched_ljf, sched_lottery,
+// sched_priority_aging, sched_mlq, sched_mlfq. Nothing else needs to be
+// touched: insertion policy, selection policy, per-tick bookkeeping and
+// preemptiveness are all part of the descriptor
 static const SchedAlgorithm* active_algorithm = &sched_round_robin;
 
 // =========================================================================
@@ -401,6 +404,109 @@ void _schedule_round_robin() {
     sched_unlock();
 }
 
+// =========================================================================
+// LOTTERY SCHEDULING (OSTEP, chapter 9 "Scheduling: Proportional Share")
+// =========================================================================
+// Internal state of the pseudo-random number generator (xorshift64, Marsaglia)
+static unsigned long lottery_rng_state = 88172645463325252UL;
+
+// Returns a pseudo-random number. The free-running system timer is mixed into
+// the xorshift64 state at every draw, so the sequence of lotteries depends on
+// the actual timing of the machine and is not identical at every boot
+static unsigned long lottery_random() {
+    // Mix the current value of the free-running system timer (microseconds)
+    lottery_rng_state ^= mmio_read(0x00003004);
+    // The xorshift state must never be zero, or it would get stuck at zero
+    if (lottery_rng_state == 0) lottery_rng_state = 88172645463325252UL;
+    // xorshift64 step: three shift-xor rounds scramble the state
+    lottery_rng_state ^= lottery_rng_state << 13;
+    lottery_rng_state ^= lottery_rng_state >> 7;
+    lottery_rng_state ^= lottery_rng_state << 17;
+    // Return the new state as the extracted random number
+    return lottery_rng_state;
+}
+
+// Lottery scheduling implementation, following OSTEP chapter 9: every process
+// holds a number of tickets (PCB field, inherited at fork) and at every
+// scheduling decision one winning ticket is drawn among those in the ready
+// queue. The expected CPU share of a process is therefore proportional to its
+// fraction of tickets, and no runnable process can starve, because each of its
+// tickets has a chance at every single draw. The winner search below is the
+// counter/winner list walk of OSTEP, figure 9.1
+void _schedule_lottery() {
+    // Take the scheduler lock during the scheduling decision
+    sched_lock();
+
+    // 1. Put the outgoing process, if still runnable, back into the draw
+    if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
+        enqueue_process_to(&ready_queue, current_process);
+    }
+
+    // Initialize pointer for the next process
+    struct PCB* next_process = NULL;
+
+    // Repeat the draw until a dispatchable winner is found: a winner may turn
+    // out to be stopped/killed once its pending signals are handled, in which
+    // case it is dropped from the queue and the lottery is run again
+    while (next_process == NULL) {
+        // Count the total number of tickets currently in the ready queue
+        // (a non-positive ticket count is treated as 1, so that a misconfigured
+        // process can still win a draw and never starves)
+        long total_tickets = 0;
+        // Walk the whole queue accumulating each process's tickets
+        for (struct PCB* p = ready_queue.head; p != NULL; p = p->next_ready) {
+            total_tickets += (p->tickets > 0 ? p->tickets : 1);
+        }
+
+        // If the queue is empty there is nobody to draw: fallback to init below
+        if (total_tickets == 0) break;
+
+        // winner: a random ticket number between 0 and total_tickets - 1
+        long winner = (long)(lottery_random() % (unsigned long)total_tickets);
+        // counter: used to track if we've found the winner yet
+        long ticket_counter = 0;
+        // Pointer to the node BEFORE the candidate, needed to unlink the winner
+        // from the middle of the intrusive list
+        struct PCB* previous = NULL;
+        // current: use this to walk through the list of jobs
+        struct PCB* candidate = ready_queue.head;
+        // Walk the queue accumulating tickets until the winning one is passed
+        while (candidate != NULL) {
+            // Add this process's tickets to the count
+            ticket_counter += (candidate->tickets > 0 ? candidate->tickets : 1);
+            // When the accumulated count exceeds the winning ticket, its holder is the winner
+            if (ticket_counter > winner) break;
+            // Otherwise move to the next process in the queue
+            previous = candidate;
+            candidate = candidate->next_ready;
+        }
+
+        // Unlink the winner from the ready queue (it can be any node, not just the head)
+        if (previous == NULL) ready_queue.head = candidate->next_ready;
+        else previous->next_ready = candidate->next_ready;
+        // If the winner was the tail, the tail moves back to its predecessor
+        if (ready_queue.tail == candidate) ready_queue.tail = previous;
+        // Disconnect the winner from the list
+        candidate->next_ready = NULL;
+
+        // Handle pending signals for the winner
+        handle_process_signals(candidate);
+        // If it is still READY it is the process to dispatch; otherwise draw again
+        if (candidate->state == PROCESS_READY) next_process = candidate;
+    }
+
+    // If the lottery found nobody, fallback to the idle init process
+    if (next_process == NULL) next_process = &init_process;
+    // Otherwise recharge its time quantum (10 ticks, like Round Robin)
+    else next_process->time_slice = 10;
+
+    // Dispatch the selected process (switch_to_process marks it RUNNING and does
+    // nothing more if it is already the current one)
+    switch_to_process(next_process);
+    // Release the scheduler lock
+    sched_unlock();
+}
+
 // Shared selection function for the non-preemptive algorithms (FCFS, SJF, LJF):
 // their difference lives entirely in the enqueue callback (FIFO vs. sorted), so
 // picking always means "take the head of the ready queue". These algorithms have
@@ -583,6 +689,16 @@ const SchedAlgorithm sched_ljf = {
     .pick_next = _schedule_queue_head,
     .on_tick = NULL,
     .is_preemptive = 0,
+};
+
+// --- Lottery (OSTEP chap. 9): FIFO queue, random proportional draw, preemptive ---
+// The insertion policy is plain FIFO because the order of the queue is
+// irrelevant: the winner is chosen by drawing a ticket, not by position
+const SchedAlgorithm sched_lottery = {
+    .enqueue = _enqueue_fifo,
+    .pick_next = _schedule_lottery,
+    .on_tick = NULL,
+    .is_preemptive = 1,
 };
 
 // --- Priority with aging: no queues, scans processes[], preemptive ---
