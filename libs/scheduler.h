@@ -84,7 +84,7 @@ struct PCB {
   // at the beginning of every epoch
   long priority;
   // Estimated length of the next CPU burst, in timer ticks: it is the sorting key
-  // of the SJF/LJF ready queue. Every time the process blocks, the estimate is
+  // of the SJF ready queue. Every time the process blocks, the estimate is
   // updated with an exponential average of the measured bursts:
   // est_burst = alpha * measured + (1 - alpha) * est_burst, with alpha = 0.5
   long est_burst;
@@ -179,7 +179,7 @@ typedef struct {
   // Optional per-tick bookkeeping (multilevel promotions/demotions); NULL if unused
   void (*on_tick)(void);
   // If 0 the timer tick never forces a context switch: the running process keeps
-  // the CPU until it blocks, yields or exits (FCFS, SJF, LJF)
+  // the CPU until it blocks, yields or exits (FCFS, SJF)
   int is_preemptive;
   // Parameters of the multilevel queue engine (only for MLQ/MLFQ, else NULL)
   const MultilevelPolicy* ml_policy;
@@ -189,7 +189,6 @@ typedef struct {
 extern const SchedAlgorithm sched_round_robin;
 extern const SchedAlgorithm sched_fcfs;
 extern const SchedAlgorithm sched_sjf;
-extern const SchedAlgorithm sched_ljf;
 extern const SchedAlgorithm sched_lottery;
 extern const SchedAlgorithm sched_priority_aging;
 extern const SchedAlgorithm sched_mlq;
