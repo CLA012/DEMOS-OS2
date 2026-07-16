@@ -175,7 +175,7 @@ int syscall_get_next_entry(int file_descriptor, FatEntryInfo *entry_info) {
 }
 
 void syscall_yield() {
-  current_process->time_slice = 0;
+  current_process->counter = 0;
 
   schedule();
 }
