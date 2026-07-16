@@ -261,17 +261,18 @@ int add_process_to_scheduler(struct PCB* process) {
     return 0;
 }
 
-// The scheduler lock is a critical-section guard for the scheduler and its data
-// structures: while sched_lock_count is greater than 0 the timer tick will not
-// trigger a context switch, so the locked code cannot be interrupted halfway
-// through a queue manipulation. Note that this is NOT the preemption policy of
-// the scheduling algorithm: that is expressed by the is_preemptive field of the
-// SchedAlgorithm descriptor. The counter nests: each sched_lock() must be
-// balanced by a sched_unlock()
-// Function to release the scheduler lock (allows context switches again)
-void sched_unlock() { current_process->sched_lock_count--; }
-// Function to acquire the scheduler lock (prevents context switches)
-void sched_lock() { current_process->sched_lock_count++; }
+// These two functions are a critical-section guard for the scheduler and its
+// data structures: while preempt_disabled is greater than 0 the timer tick will
+// not trigger a context switch, so the code in between cannot be interrupted
+// halfway through a queue manipulation. Note that this is NOT the preemption
+// policy of the scheduling algorithm: that is expressed by the is_preemptive
+// field of the SchedAlgorithm descriptor (even non-preemptive algorithms call
+// these functions, to protect their own scheduling decision). The count nests:
+// each preempt_disable() must be balanced by a preempt_enable()
+// Function to decrement the preemption disable counter (allows context switches again)
+void preempt_enable() { current_process->preempt_disabled--; }
+// Function to increment the preemption disable counter (prevents context switches)
+void preempt_disable() { current_process->preempt_disabled++; }
 
 // Forward declaration for the signal handling function
 void handle_process_signals(struct PCB* process);
@@ -281,9 +282,9 @@ void switch_to_process(struct PCB *next_process);
 extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 
 // Priority scheduling algorithm with an aging mechanism to prevent starvation.
-// It follows the historic Linux "epoch" scheme, where time_slice plays a double
+// It follows the historic Linux "epoch" scheme, where counter plays a double
 // role: residual quantum AND dynamic priority. The runnable process with the
-// largest time_slice wins the CPU; when all runnable processes have exhausted
+// largest counter wins the CPU; when all runnable processes have exhausted
 // their slice the epoch ends and every process is recharged (see below).
 // The runnable processes live in the shared ready_queue (plain FIFO insertion:
 // the order does not matter, the selection walks the whole queue). Note that
@@ -291,11 +292,11 @@ extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 // design it must also reach the blocked processes: it is exactly there that
 // the aging bonus accumulates
 void _schedule_priority_aging() {
-  // Take the scheduler lock so the decision cannot be interrupted
-  sched_lock();
+  // Disable preemption so the decision cannot be interrupted
+  preempt_disable();
 
   // If the current process is still runnable, put it back in the ready queue:
-  // it competes with the others with its residual time_slice (no recharge here,
+  // it competes with the others with its residual counter (no recharge here,
   // in the epoch scheme the quantum is only recharged when the epoch ends)
   if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
     enqueue_process_to(&ready_queue, current_process);
@@ -310,7 +311,7 @@ void _schedule_priority_aging() {
     // unlink it) and the highest residual time slice seen in this pass
     struct PCB* best = NULL;
     struct PCB* best_previous = NULL;
-    long max_time_slice = 0;
+    long max_counter = 0;
 
     // Predecessor of the node under exam, for unlinking
     struct PCB* previous = NULL;
@@ -326,11 +327,11 @@ void _schedule_priority_aging() {
       if (node->state != PROCESS_READY) {
         remove_process_from(&ready_queue, previous, node);
       } else {
-        // The queued process with the largest residual time_slice (that is,
+        // The queued process with the largest residual counter (that is,
         // with the highest dynamic priority) wins the selection
-        if (node->time_slice > max_time_slice) {
+        if (node->counter > max_counter) {
           // Record the new best candidate and its predecessor
-          max_time_slice = node->time_slice;
+          max_counter = node->counter;
           best = node;
           best_previous = previous;
         }
@@ -352,17 +353,17 @@ void _schedule_priority_aging() {
     // If the queue is empty there is nobody to schedule: fallback to init below
     if (ready_queue.head == NULL) break;
 
-    // If no process had time_slice > 0 (all runnable ones are exhausted), the
+    // If no process had counter > 0 (all runnable ones are exhausted), the
     // epoch is over: we start a new one applying the aging rule
     for (int i = 0; i < N_PROCESSES; i++) {
       // If the process exists
       if (processes[i]) {
-        // New epoch: time_slice = time_slice/2 + priority, for ALL processes,
+        // New epoch: counter = counter/2 + priority, for ALL processes,
         // blocked ones included. A CPU-bound process that used up its slice simply
         // reloads its static priority; a blocked process keeps half of its residual
         // slice as a bonus (geometric series capped at 2*priority), so I/O-bound
         // processes gain dynamic priority: this is the aging that prevents starvation
-        processes[i]->time_slice = (processes[i]->time_slice >> 1) + processes[i]->priority;
+        processes[i]->counter = (processes[i]->counter >> 1) + processes[i]->priority;
       }
     }
   } // End of while(1) loop
@@ -373,8 +374,8 @@ void _schedule_priority_aging() {
   // Dispatch the selected process (switch_to_process marks it RUNNING and does
   // nothing more if it is already the current one)
   switch_to_process(next_process);
-  // Release the scheduler lock before leaving the scheduler
-  sched_unlock();
+  // Re-enable preemption before leaving the scheduler
+  preempt_enable();
 }
 
 // =========================================================================
@@ -383,8 +384,8 @@ void _schedule_priority_aging() {
 
 // Round Robin scheduling algorithm implementation
 void _schedule_round_robin() {
-    // Take the scheduler lock during the scheduling decision
-    sched_lock();
+    // Disable preemption during the scheduling decision
+    preempt_disable();
 
     // 1. If the current process was interrupted but is still runnable (not init)...
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
@@ -405,13 +406,13 @@ void _schedule_round_robin() {
     // If the queue was empty or all processes were stopped/zombies
     if (next_process == NULL) next_process = &init_process; // Fallback to idle task
     // Otherwise, recharge its time quantum (e.g., 10 ticks)
-    else next_process->time_slice = 10;
+    else next_process->counter = 10;
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Release the scheduler lock
-    sched_unlock();
+    // Re-enable preemption
+    preempt_enable();
 }
 
 // =========================================================================
@@ -444,8 +445,8 @@ static unsigned long lottery_random() {
 // tickets has a chance at every single draw. The winner search below is the
 // counter/winner list walk of OSTEP, figure 9.1
 void _schedule_lottery() {
-    // Take the scheduler lock during the scheduling decision
-    sched_lock();
+    // Disable preemption during the scheduling decision
+    preempt_disable();
 
     // 1. Put the outgoing process, if still runnable, back into the draw
     if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
@@ -503,13 +504,13 @@ void _schedule_lottery() {
     // If the lottery found nobody, fallback to the idle init process
     if (next_process == NULL) next_process = &init_process;
     // Otherwise recharge its time quantum (10 ticks, like Round Robin)
-    else next_process->time_slice = 10;
+    else next_process->counter = 10;
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Release the scheduler lock
-    sched_unlock();
+    // Re-enable preemption
+    preempt_enable();
 }
 
 // Shared selection function for the non-preemptive algorithms (FCFS, SJF):
@@ -520,8 +521,8 @@ void _schedule_lottery() {
 // This replaces the two identical _schedule_fcfs/_schedule_sjf functions and
 // their misleading early-return on a still-running current process
 void _schedule_queue_head() {
-    // Take the scheduler lock during the scheduling decision
-    sched_lock();
+    // Disable preemption during the scheduling decision
+    preempt_disable();
 
     // If the current process yielded voluntarily but is still runnable, put it
     // back in the ready queue according to the algorithm's insertion policy
@@ -545,8 +546,8 @@ void _schedule_queue_head() {
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Release the scheduler lock
-    sched_unlock();
+    // Re-enable preemption
+    preempt_enable();
 }
 
 // Multilevel queue scheduling, shared by MLQ and MLFQ: scan the queues from the
@@ -556,8 +557,8 @@ void _schedule_queue_head() {
 // demotion has already been recorded in queue_level by _multilevel_on_tick,
 // while a voluntary yield keeps the process at its level
 void _schedule_multilevel() {
-    // Take the scheduler lock during the scheduling decision
-    sched_lock();
+    // Disable preemption during the scheduling decision
+    preempt_disable();
 
     // Parameters (levels, quanta, migration rules) of the active algorithm
     const MultilevelPolicy* policy = active_algorithm->ml_policy;
@@ -594,13 +595,13 @@ void _schedule_multilevel() {
     if (next_process == NULL) next_process = &init_process;
     // Otherwise assign the time quantum configured for the level it came from
     // (lower levels get longer quanta: fewer context switches for CPU-bound work)
-    else next_process->time_slice = policy->quantum[target_level];
+    else next_process->counter = policy->quantum[target_level];
 
     // Dispatch the selected process (switch_to_process marks it RUNNING and does
     // nothing more if it is already the current one)
     switch_to_process(next_process);
-    // Release the scheduler lock
-    sched_unlock();
+    // Re-enable preemption
+    preempt_enable();
 }
 
 // =========================================================================
@@ -647,12 +648,12 @@ static void _multilevel_on_tick() {
 
     // Penalty (Demotion), only if the policy enables it: a process that exhausted
     // its time slice without blocking is CPU-bound and slides one level down.
-    // The check on sched_lock_count mirrors the one in handle_timer_tick: while
-    // the scheduler is locked the process will keep running
+    // The check on preempt_disabled mirrors the one in handle_timer_tick: while
+    // preemption is disabled the process will keep running
     if (policy->demote_on_expiry
         && current_process != &init_process
-        && current_process->time_slice <= 0
-        && current_process->sched_lock_count == 0
+        && current_process->counter <= 0
+        && current_process->preempt_disabled == 0
         // Do nothing if it is already in the lowest priority queue
         && queue_level[current_process->pid] < policy->n_levels - 1) {
         // Demote it to the next lower queue level (the re-enqueue at the new
@@ -701,7 +702,7 @@ const SchedAlgorithm sched_lottery = {
 // --- Priority with aging: shared ready queue, epoch-based selection, preemptive ---
 // Insertion is plain FIFO: the order in the queue does not matter, because the
 // selection walks the whole queue looking for the largest dynamic priority
-// (time_slice). The epoch recharge still spans all processes, blocked included
+// (counter). The epoch recharge still spans all processes, blocked included
 const SchedAlgorithm sched_priority_aging = {
     .enqueue = _enqueue_fifo,
     .pick_next = _schedule_priority_aging,
@@ -751,7 +752,7 @@ void schedule() {
         current_process->burst_ticks = 0;
     }
     // Force the current process's time slice to 0 so it gets preempted/re-evaluated
-    current_process->time_slice = 0;
+    current_process->counter = 0;
     // Call the master dispatcher
     _schedule();
 }
@@ -816,9 +817,9 @@ void switch_to_process(struct PCB *next_process) {
     cpu_switch_to_process(previous_process, current_process);
 }
 
-// Function called at the end of a newly created process's first context switch to
-// release the scheduler lock it was created with (see copy_process)
-void schedule_tail(void) { sched_unlock(); }
+// Function called at the end of a newly created process's first context switch
+// to re-enable the preemption, disabled at its creation (see copy_process)
+void schedule_tail(void) { preempt_enable(); }
 
 // =========================================================================
 // TIMER TICK
@@ -826,7 +827,7 @@ void schedule_tail(void) { sched_unlock(); }
 // Function called by the hardware timer interrupt handler at regular intervals
 void handle_timer_tick() {
     // Decrement the residual time slice of the currently running process
-    current_process->time_slice -= 1;
+    current_process->counter -= 1;
     // Account the tick to the CPU burst the current process is consuming: the
     // measurement feeds the est_burst estimate used by SJF (see schedule)
     current_process->burst_ticks += 1;
@@ -835,14 +836,14 @@ void handle_timer_tick() {
     // (currently only MLFQ does: periodic boost and demotions)
     if (active_algorithm->on_tick) active_algorithm->on_tick();
 
-    // If the current process still has time left OR it holds the scheduler lock
-    if (current_process->time_slice > 0 || current_process->sched_lock_count > 0) {
+    // If the current process still has time left OR preemption is explicitly disabled
+    if (current_process->counter > 0 || current_process->preempt_disabled > 0) {
         // Return immediately, allowing the process to continue running
         return;
     }
 
     // Safety catch: ensure the time slice doesn't go negative
-    current_process->time_slice = 0;
+    current_process->counter = 0;
 
     // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
     // current process keeps the CPU until it blocks, yields or exits, so the
@@ -862,8 +863,8 @@ void handle_timer_tick() {
 // =========================================================================
 // Function called when a process terminates
 void exit_process() {
-    // Take the scheduler lock to ensure atomicity of the exit process
-    sched_lock();
+    // Disable preemption to ensure atomicity of the exit process
+    preempt_disable();
     // Set the current process's state to ZOMBIE
     current_process->state = PROCESS_ZOMBIE;
     
@@ -884,8 +885,8 @@ void exit_process() {
         }
     }
 
-    // Release the scheduler lock
-    sched_unlock();
+    // Re-enable preemption
+    preempt_enable();
     // Call the scheduler to switch away from the dying process permanently
     schedule();
 }

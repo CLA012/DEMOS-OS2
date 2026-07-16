@@ -11,8 +11,8 @@
 // If clone_flags is PF_KTHREAD, the process will execute the given function; otherwhise it will be
 // a copy of the current process
 int copy_process(unsigned long clone_flags, unsigned long function, unsigned long argument) {
-  // I take the scheduler lock to avoid this function to be interrupted
-  sched_lock();
+  // I disable the preemption to avoid this function to be interrupted
+  preempt_disable();
 
   struct PCB* new_process;
   new_process = (struct PCB*)allocate_kernel_page();
@@ -52,7 +52,7 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   // The new process is READY (runnable): it will become RUNNING only when the
   // scheduler dispatches it in switch_to_process
   new_process->state = PROCESS_READY;
-  new_process->time_slice = 10;
+  new_process->counter = 10;
 
   // The estimate of the child's next CPU burst is inherited from the parent: it
   // is the best guess available until the child gets measured on its own bursts
@@ -70,9 +70,9 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
   // on the PCB to give a process a larger or smaller CPU share
   new_process->tickets = current_process->tickets;
   
-  // The child is born holding the scheduler lock: schedule_tail releases it
-  // at the end of its first context switch
-  new_process->sched_lock_count = 1;
+  // The child is born with the preemption disabled: schedule_tail re-enables
+  // it at the end of its first context switch
+  new_process->preempt_disabled = 1;
   new_process->pid = process_id;
 
   // x19 and x20 will be used in the assembly to call the function
@@ -88,7 +88,7 @@ int copy_process(unsigned long clone_flags, unsigned long function, unsigned lon
       return -1; // Fails if the process array is full
   }
 
-  sched_unlock();
+  preempt_enable();
 
   return process_id;
 }

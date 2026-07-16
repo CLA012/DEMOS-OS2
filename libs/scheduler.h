@@ -79,8 +79,8 @@ struct PCB {
   // reaches 0 the process can be preempted. For the priority aging algorithm it
   // doubles as the DYNAMIC priority of the process (historic Linux epoch scheme,
   // see _schedule_priority_aging in scheduler.c)
-  long time_slice;
-  // Static priority: used by the priority aging algorithm to recharge time_slice
+  long counter;
+  // Static priority: used by the priority aging algorithm to recharge counter
   // at the beginning of every epoch
   long priority;
   // Estimated length of the next CPU burst, in timer ticks: it is the sorting key
@@ -101,10 +101,10 @@ struct PCB {
   // a process is tickets / total tickets of the runnable processes. Chosen at
   // creation: the child inherits the parent's tickets (default 10)
   long tickets;
-  // Scheduler lock nesting counter: while greater than 0 the timer tick will not
-  // preempt this process (critical-section guard, see sched_lock/sched_unlock).
+  // Preemption-disable nesting counter: while greater than 0 the timer tick will not
+  // preempt this process (critical-section guard, see preempt_disable/preempt_enable).
   // Not to be confused with the algorithm's preemption policy (is_preemptive)
-  int sched_lock_count;
+  int preempt_disabled;
   long pid;
 
   unsigned long flags;
@@ -198,12 +198,12 @@ extern struct PCB *current_process;
 extern struct PCB *processes[N_PROCESSES];
 extern int n_processes;
 
-// Critical-section guard of the scheduler: code between sched_lock() and
-// sched_unlock() cannot be preempted by the timer tick. This is a protection
+// Critical-section guard of the scheduler: code between preempt_disable() and
+// preempt_enable() cannot be preempted by the timer tick. This is a protection
 // for the scheduler's data structures, NOT the preemption policy of the
 // scheduling algorithm (which is the is_preemptive field of the descriptor)
-extern void sched_unlock();
-extern void sched_lock();
+extern void preempt_enable();
+extern void preempt_disable();
 extern void schedule();
 extern void switch_to_process(struct PCB *);
 extern void handle_timer_tick();
