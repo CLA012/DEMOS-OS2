@@ -131,8 +131,8 @@ struct PCB {
 #define PROCESS_WAITING_ANOTHER_PROCESS 6
 #define PROCESS_STOPPED 7
 // The process is runnable but does NOT have the CPU: it sits in a ready queue
-// (or, for priority aging, simply in processes[]) waiting to be dispatched.
-// It goes back to this state every time it is re-enqueued
+// waiting to be dispatched. It goes back to this state every time it is
+// re-enqueued
 #define PROCESS_READY 8
 
 // Classes for the multilevel queue algorithms (field queue_class of the PCB)

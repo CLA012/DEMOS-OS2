@@ -34,7 +34,7 @@ typedef struct {
 // Macro to initialize an empty queue with NULL head and tail pointers
 #define QUEUE_INIT {NULL, NULL}
 
-// Define the ready queue used by standard algorithms like FCFS, RR, SJF
+// Define the ready queue shared by FCFS, RR, SJF, lottery and priority aging
 static ProcessQueue ready_queue = QUEUE_INIT;
 // Define the array of queues shared by the multilevel algorithms (MLQ and MLFQ),
 // scanned from level 0 (highest priority) to n_levels - 1 (lowest priority)
@@ -121,6 +121,19 @@ struct PCB* dequeue_process_from(ProcessQueue* queue) {
     return process;
 }
 
+// Function to unlink a specific process from a queue, given its predecessor in
+// the list (NULL if the process is the head). It is needed by the algorithms
+// that select a process from the middle of a queue (priority aging, lottery)
+static void remove_process_from(ProcessQueue* queue, struct PCB* previous, struct PCB* process) {
+    // Bypass the process in the chain: from its predecessor, or from the head
+    if (previous == NULL) queue->head = process->next_ready;
+    else previous->next_ready = process->next_ready;
+    // If the removed process was the tail, the tail moves back to its predecessor
+    if (queue->tail == process) queue->tail = previous;
+    // Disconnect the removed process from the queue
+    process->next_ready = NULL;
+}
+
 // Function to insert a process into a queue kept sorted by ascending estimated
 // length of the next CPU burst (est_burst), shortest at the head: it is the
 // insertion policy of SJF
@@ -186,17 +199,6 @@ static void _enqueue_sjf(struct PCB* process) {
     // Insert the process keeping the queue ordered by the estimated length of
     // the next CPU burst (est_burst), shortest at the head
     enqueue_sorted_to(&ready_queue, process);
-}
-
-// --- Priority aging: NO enqueueing ---
-// The priority aging algorithm does not use ready queues at all:
-// _schedule_priority_aging scans the whole processes[] array at every decision,
-// so a process that becomes ready does not need to be inserted anywhere.
-// This explicitly empty callback documents that choice
-static void _enqueue_priority_aging(struct PCB* process) {
-    // No queue insertion: marking the process READY is enough to make it
-    // selectable by the scan in _schedule_priority_aging
-    process->state = PROCESS_READY;
 }
 
 // --- MLQ / MLFQ: insertion into the queue matching the process's current level ---
@@ -282,45 +284,73 @@ extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 // It follows the historic Linux "epoch" scheme, where time_slice plays a double
 // role: residual quantum AND dynamic priority. The runnable process with the
 // largest time_slice wins the CPU; when all runnable processes have exhausted
-// their slice the epoch ends and every process is recharged (see below)
+// their slice the epoch ends and every process is recharged (see below).
+// The runnable processes live in the shared ready_queue (plain FIFO insertion:
+// the order does not matter, the selection walks the whole queue). Note that
+// the epoch recharge instead spans the whole processes[] array, because by
+// design it must also reach the blocked processes: it is exactly there that
+// the aging bonus accumulates
 void _schedule_priority_aging() {
   // Take the scheduler lock so the decision cannot be interrupted
   sched_lock();
-  // Variables to track the highest residual time slice and the index of the chosen process
-  long max_time_slice, next_process_index;
 
-  // Infinite loop to find a process to run
+  // If the current process is still runnable, put it back in the ready queue:
+  // it competes with the others with its residual time_slice (no recharge here,
+  // in the epoch scheme the quantum is only recharged when the epoch ends)
+  if (current_process != &init_process && current_process->state == PROCESS_RUNNING) {
+    enqueue_process_to(&ready_queue, current_process);
+  }
+
+  // Pointer to the selected process
+  struct PCB* next_process = NULL;
+
+  // Loop until a process is selected or the queue turns out to be empty
   while (1) {
-    // Reset the max time slice for this pass
-    max_time_slice = 0;
-    // Default to the init process (index 0)
-    next_process_index = 0;
-    
-    // Loop through all possible process slots in the global array
-    for (int i = 0; i < N_PROCESSES; i++) {
-      // If a process exists at this index
-      if (processes[i]) {
-        // Process any pending signals (kill, stop, resume) for this process
-        handle_process_signals(processes[i]);
-        // Both READY processes and the currently RUNNING one compete with their
-        // residual time_slice; the idle init process never takes part in the
-        // selection (it is only the fallback when nobody else is runnable)
-        if (processes[i] != &init_process
-            && (processes[i]->state == PROCESS_READY || processes[i]->state == PROCESS_RUNNING)
-            && processes[i]->time_slice > max_time_slice) {
-          // Update the maximum time slice found so far
-          max_time_slice = processes[i]->time_slice;
-          // Save the index of this process as the next potential candidate
-          next_process_index = i;
+    // Best candidate found so far, its predecessor in the list (needed to
+    // unlink it) and the highest residual time slice seen in this pass
+    struct PCB* best = NULL;
+    struct PCB* best_previous = NULL;
+    long max_time_slice = 0;
+
+    // Predecessor of the node under exam, for unlinking
+    struct PCB* previous = NULL;
+    // Walk the whole ready queue
+    struct PCB* node = ready_queue.head;
+    while (node != NULL) {
+      // Save the successor now: the node may be unlinked below
+      struct PCB* next_node = node->next_ready;
+      // Process any pending signals (kill, stop) for this process
+      handle_process_signals(node);
+      // A process that is no longer READY (killed or stopped by a signal)
+      // must not stay in the ready queue: unlink it and move on
+      if (node->state != PROCESS_READY) {
+        remove_process_from(&ready_queue, previous, node);
+      } else {
+        // The queued process with the largest residual time_slice (that is,
+        // with the highest dynamic priority) wins the selection
+        if (node->time_slice > max_time_slice) {
+          // Record the new best candidate and its predecessor
+          max_time_slice = node->time_slice;
+          best = node;
+          best_previous = previous;
         }
+        // Only nodes kept in the queue become the predecessor of the next one
+        previous = node;
       }
+      // Move to the saved successor
+      node = next_node;
     }
 
-    // If we found at least one ready process with a residual time slice greater than 0
-    if (max_time_slice > 0) {
-      // Break out of the infinite loop
+    // If a candidate with residual slice was found, extract it from the queue
+    if (best != NULL) {
+      remove_process_from(&ready_queue, best_previous, best);
+      next_process = best;
+      // Exit the selection loop
       break;
     }
+
+    // If the queue is empty there is nobody to schedule: fallback to init below
+    if (ready_queue.head == NULL) break;
 
     // If no process had time_slice > 0 (all runnable ones are exhausted), the
     // epoch is over: we start a new one applying the aging rule
@@ -337,16 +367,12 @@ void _schedule_priority_aging() {
     }
   } // End of while(1) loop
 
-  // Retrieve the pointer to the selected next process
-  struct PCB* next_process = processes[next_process_index];
-  // Handle signals for the selected process one more time just in case
-  handle_process_signals(next_process);
+  // If nobody is runnable, fallback to the idle init process
+  if (next_process == NULL) next_process = &init_process;
 
-  // Verify the process is still runnable (signals might have stopped/killed it)
-  if (next_process->state == PROCESS_READY || next_process->state == PROCESS_RUNNING) {
-    // Perform the context switch to the selected process
-    switch_to_process(next_process);
-  }
+  // Dispatch the selected process (switch_to_process marks it RUNNING and does
+  // nothing more if it is already the current one)
+  switch_to_process(next_process);
   // Release the scheduler lock before leaving the scheduler
   sched_unlock();
 }
@@ -466,12 +492,7 @@ void _schedule_lottery() {
         }
 
         // Unlink the winner from the ready queue (it can be any node, not just the head)
-        if (previous == NULL) ready_queue.head = candidate->next_ready;
-        else previous->next_ready = candidate->next_ready;
-        // If the winner was the tail, the tail moves back to its predecessor
-        if (ready_queue.tail == candidate) ready_queue.tail = previous;
-        // Disconnect the winner from the list
-        candidate->next_ready = NULL;
+        remove_process_from(&ready_queue, previous, candidate);
 
         // Handle pending signals for the winner
         handle_process_signals(candidate);
@@ -677,9 +698,12 @@ const SchedAlgorithm sched_lottery = {
     .is_preemptive = 1,
 };
 
-// --- Priority with aging: no queues, scans processes[], preemptive ---
+// --- Priority with aging: shared ready queue, epoch-based selection, preemptive ---
+// Insertion is plain FIFO: the order in the queue does not matter, because the
+// selection walks the whole queue looking for the largest dynamic priority
+// (time_slice). The epoch recharge still spans all processes, blocked included
 const SchedAlgorithm sched_priority_aging = {
-    .enqueue = _enqueue_priority_aging,
+    .enqueue = _enqueue_fifo,
     .pick_next = _schedule_priority_aging,
     .on_tick = NULL,
     .is_preemptive = 1,
