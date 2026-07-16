@@ -46,6 +46,8 @@ static int queue_level[N_PROCESSES] = {0};
 // --- Multilevel policies: MLQ and MLFQ are the same engine with different numbers ---
 // MLQ: two fixed queues (foreground, quantum 10; background, quantum 20 to reduce
 // context switches for batch work) and a null migration policy
+// ref: OSTEP cap. 8: pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-mlfq.pdf
+// ref: github.com/remzi-arpacidusseau/ostep-homework/tree/master/cpu-sched-mlfq
 static const MultilevelPolicy ml_policy_mlq = {
     .n_levels = 2,
     .quantum = {10, 20, 0},
@@ -76,6 +78,7 @@ static const SchedAlgorithm* active_algorithm = &sched_round_robin;
 // QUEUE OPERATIONS (O(1) Complexity)
 // =========================================================================
 // Function to add a process to the end of a specific queue
+
 void enqueue_process_to(ProcessQueue* queue, struct PCB* process) {
     // If the process is NULL or is the idle init process, do not enqueue it
     if (!process || process == &init_process) return;
@@ -291,6 +294,8 @@ extern void cpu_switch_to_process(struct PCB *prev, struct PCB *next);
 // the epoch recharge instead spans the whole processes[] array, because by
 // design it must also reach the blocked processes: it is exactly there that
 // the aging bonus accumulates
+// ref: https://github.com/s-matyukevich/raspberry-pi-os/blob/master/docs/lesson04/rpi-os.md
+
 void _schedule_priority_aging() {
   // Disable preemption so the decision cannot be interrupted
   preempt_disable();
@@ -418,7 +423,10 @@ void _schedule_round_robin() {
 // =========================================================================
 // LOTTERY SCHEDULING (OSTEP, chapter 9 "Scheduling: Proportional Share")
 // =========================================================================
+// ref: OSTEP cap. 9: pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-lottery.pdf
+// ref: github.com/remzi-arpacidusseau/ostep-homework/tree/master/cpu-sched-lottery
 // Internal state of the pseudo-random number generator (xorshift64, Marsaglia)
+// ref: https://www.jstatsoft.org/article/view/v008i14
 static unsigned long lottery_rng_state = 88172645463325252UL;
 
 // Returns a pseudo-random number. The free-running system timer is mixed into
@@ -662,6 +670,8 @@ static void _multilevel_on_tick() {
     }
 }
 
+// ref : https://github.com/torvalds/linux/blob/v4.14/kernel/sched/sched.h#L1403
+// riga 1400 sched_class
 // =========================================================================
 // ALGORITHM DESCRIPTORS
 // =========================================================================
