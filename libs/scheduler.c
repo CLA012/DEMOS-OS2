@@ -34,7 +34,7 @@ typedef struct {
 // Macro to initialize an empty queue with NULL head and tail pointers
 #define QUEUE_INIT {NULL, NULL}
 
-// Define the ready queue used by standard algorithms like FCFS, RR, SJF, LJF
+// Define the ready queue used by standard algorithms like FCFS, RR, SJF
 static ProcessQueue ready_queue = QUEUE_INIT;
 // Define the array of queues shared by the multilevel algorithms (MLQ and MLFQ),
 // scanned from level 0 (highest priority) to n_levels - 1 (lowest priority)
@@ -66,7 +66,7 @@ static const MultilevelPolicy ml_policy_mlfq = {
 // =========================================================================
 // To change the scheduling algorithm, point active_algorithm to one of the
 // descriptors declared in scheduler.h and defined at the bottom of this file:
-// sched_round_robin, sched_fcfs, sched_sjf, sched_ljf, sched_lottery,
+// sched_round_robin, sched_fcfs, sched_sjf, sched_lottery,
 // sched_priority_aging, sched_mlq, sched_mlfq. Nothing else needs to be
 // touched: insertion policy, selection policy, per-tick bookkeeping and
 // preemptiveness are all part of the descriptor
@@ -121,9 +121,10 @@ struct PCB* dequeue_process_from(ProcessQueue* queue) {
     return process;
 }
 
-// Function to insert a process into a queue kept sorted by the estimated length
-// of the next CPU burst (est_burst): ascending order for SJF, descending for LJF
-void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) {
+// Function to insert a process into a queue kept sorted by ascending estimated
+// length of the next CPU burst (est_burst), shortest at the head: it is the
+// insertion policy of SJF
+void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process) {
     // Ignore NULL processes or the init process
     if (!process || process == &init_process) return;
     // Clear the process's next pointer
@@ -139,13 +140,8 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
         return;
     }
 
-    // Determine if the new process should be placed at the very front of the queue
-    // based on whether we are sorting ascending (SJF) or descending (LJF)
-    int goes_first = ascending ? (process->est_burst < queue->head->est_burst)
-                               : (process->est_burst > queue->head->est_burst);
-
-    // If the new process has the shortest (SJF) / longest (LJF) estimated burst
-    if (goes_first) {
+    // If the new process has the shortest estimated burst of the whole queue
+    if (process->est_burst < queue->head->est_burst) {
         // Point the new process's next to the current head
         process->next_ready = queue->head;
         // Update the queue's head to be the new process
@@ -156,15 +152,10 @@ void enqueue_sorted_to(ProcessQueue* queue, struct PCB* process, int ascending) 
 
     // Initialize a pointer to traverse the queue starting from the head
     struct PCB* current = queue->head;
-    // Variable to hold the loop condition evaluation
-    int condition;
     // Traverse the queue to find the correct insertion spot
     while (current->next_ready != NULL) {
-        // Check if the new process estimate fits the sorted order compared to the next node
-        condition = ascending ? (process->est_burst >= current->next_ready->est_burst)
-                              : (process->est_burst <= current->next_ready->est_burst);
-        // If the condition is false, we have found the insertion point
-        if (!condition) break;
+        // Stop as soon as the next node has a longer estimate than the new process
+        if (process->est_burst < current->next_ready->est_burst) break;
         // Move to the next process in the queue
         current = current->next_ready;
     }
@@ -190,18 +181,11 @@ static void _enqueue_fifo(struct PCB* process) {
     enqueue_process_to(&ready_queue, process);
 }
 
-// --- SJF (Shortest Job First): insertion sorted by shortest job (ascending order) ---
+// --- SJF (Shortest Job First): insertion sorted by shortest job first ---
 static void _enqueue_sjf(struct PCB* process) {
     // Insert the process keeping the queue ordered by the estimated length of
     // the next CPU burst (est_burst), shortest at the head
-    enqueue_sorted_to(&ready_queue, process, 1);
-}
-
-// --- LJF (Longest Job First): insertion sorted by longest job (descending order) ---
-static void _enqueue_ljf(struct PCB* process) {
-    // Insert the process keeping the queue ordered by the estimated length of
-    // the next CPU burst (est_burst), longest at the head
-    enqueue_sorted_to(&ready_queue, process, 0);
+    enqueue_sorted_to(&ready_queue, process);
 }
 
 // --- Priority aging: NO enqueueing ---
@@ -507,7 +491,7 @@ void _schedule_lottery() {
     sched_unlock();
 }
 
-// Shared selection function for the non-preemptive algorithms (FCFS, SJF, LJF):
+// Shared selection function for the non-preemptive algorithms (FCFS, SJF):
 // their difference lives entirely in the enqueue callback (FIFO vs. sorted), so
 // picking always means "take the head of the ready queue". These algorithms have
 // is_preemptive = 0 in their descriptor, therefore the timer tick never calls
@@ -683,14 +667,6 @@ const SchedAlgorithm sched_sjf = {
     .is_preemptive = 0,
 };
 
-// --- LJF: ready queue sorted by longest job, non-preemptive ---
-const SchedAlgorithm sched_ljf = {
-    .enqueue = _enqueue_ljf,
-    .pick_next = _schedule_queue_head,
-    .on_tick = NULL,
-    .is_preemptive = 0,
-};
-
 // --- Lottery (OSTEP chap. 9): FIFO queue, random proportional draw, preemptive ---
 // The insertion policy is plain FIFO because the order of the queue is
 // irrelevant: the winner is chosen by drawing a ticket, not by position
@@ -828,7 +804,7 @@ void handle_timer_tick() {
     // Decrement the residual time slice of the currently running process
     current_process->time_slice -= 1;
     // Account the tick to the CPU burst the current process is consuming: the
-    // measurement feeds the est_burst estimate used by SJF/LJF (see schedule)
+    // measurement feeds the est_burst estimate used by SJF (see schedule)
     current_process->burst_ticks += 1;
 
     // Run the active algorithm's per-tick bookkeeping, if it has any
@@ -844,8 +820,8 @@ void handle_timer_tick() {
     // Safety catch: ensure the time slice doesn't go negative
     current_process->time_slice = 0;
 
-    // Non-preemptive algorithms (FCFS, SJF, LJF) never switch on a timer tick:
-    // the current process keeps the CPU until it blocks, yields or exits, so the
+    // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
+    // current process keeps the CPU until it blocks, yields or exits, so the
     // dispatcher must not even be called here
     if (!active_algorithm->is_preemptive) return;
 
