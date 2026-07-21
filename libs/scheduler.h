@@ -204,6 +204,14 @@ extern struct PCB *current_process;
 extern struct PCB *processes[N_PROCESSES];
 extern int n_processes;
 
+// Kernel API to change one static scheduling parameter of a process (see the
+// SCHED_PARAM_* selectors in common/syscalls_types.h). It is the single entry
+// point used by the set_sched_param syscall and available to kernel code; the
+// scheduler owns it because only the scheduler knows the invariants to protect
+// (e.g. the reconciliation between queue_priority and the current queue level).
+// ref: man 2 setpriority (POSIX), man 2 sched_setattr (Linux)
+extern int sched_set_param(struct PCB* process, int param, long value);
+
 // Critical-section guard of the scheduler: code between preempt_disable() and
 // preempt_enable() cannot be preempted by the timer tick. This is a protection
 // for the scheduler's data structures, NOT the preemption policy of the

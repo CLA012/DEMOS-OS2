@@ -30,6 +30,16 @@ void main() {
             // ==========================================
             // Save the PID of the newly created child in the array
             pids[i] = pid;
+
+            // Children are born all equal (they inherit the parent's scheduling
+            // parameters): the parent differentiates them AFTER the fork, like
+            // the POSIX nice()/setpriority() scheme. Each benchmark gets a
+            // different static priority (used by priority aging), a different
+            // number of lottery tickets (its expected CPU share) and a
+            // different multilevel queue level (0 = highest priority queue)
+            call_syscall_set_sched_param(pid, SCHED_PARAM_PRIORITY, i + 1);
+            call_syscall_set_sched_param(pid, SCHED_PARAM_TICKETS, (i + 1) * 10);
+            call_syscall_set_sched_param(pid, SCHED_PARAM_QUEUE_PRIORITY, i);
         }
     }
 
