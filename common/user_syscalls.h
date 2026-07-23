@@ -78,6 +78,8 @@ int call_syscall_send_signal(int destination_pid, int signal_flag);
 // processes with different priorities are created: fork first, then the parent
 // sets the child's parameters (like the POSIX nice()/setpriority() scheme)
 int call_syscall_set_sched_param(int pid, int param, int value);
+// Returns the pid of the calling process (like POSIX getpid)
+int call_syscall_get_pid();
 
 unsigned long call_syscall_get_time();
 

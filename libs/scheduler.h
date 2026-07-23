@@ -12,7 +12,8 @@
 #define MAX_FILES_PER_PROCESS 16
 #define MAX_PROCESS_PAGES 16
 #define MAX_MESSAGES_PER_PROCESS 4
-#define MAX_MESSAGES_BODY_SIZE 256
+// MAX_MESSAGES_BODY_SIZE is defined in common/ipc_types.h (included below),
+// because it is shared with the user side of the message syscalls
 
 #define PF_KTHREAD 0x00000002
 

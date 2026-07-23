@@ -12,6 +12,23 @@
 // Include the shared syscall definitions (SCHED_PARAM_* selectors used by
 // sched_set_param, shared with the user side of the set_sched_param syscall)
 #include "../common/syscalls_types.h"
+// Include the UART driver, used by the ML_TRACE migration traces below
+#include "../drivers/uart/uart.h"
+
+// Set to 1 to print the multilevel queue migrations on the UART (demo/testing
+// aid for MLQ/MLFQ: creation level, explicit level changes via sched_set_param,
+// demotions and periodic boosts). The prints happen only when a multilevel
+// algorithm is active; set to 0 to silence them. Note: the demotion/boost
+// traces run in interrupt context and the UART is polled, so with the traces
+// on the timing of the demo is slightly perturbed
+#define ML_TRACE 1
+
+// Prints a small non-negative number in decimal on the UART (trace helper)
+static void ml_trace_num(long number) {
+    // Two digits are enough for pids and levels
+    if (number >= 10) uart_putc('0' + (number / 10) % 10);
+    uart_putc('0' + number % 10);
+}
 
 // Initialize the init process (the idle task) using a predefined macro
 static struct PCB init_process = INIT_PROCESS;
@@ -257,6 +274,16 @@ int add_process_to_scheduler(struct PCB* process) {
     }
     queue_level[process->pid] = start_level;
 
+    // Trace: with a multilevel algorithm active, show the queue (= priority)
+    // where the new process starts its life
+    if (ML_TRACE && active_algorithm->ml_policy) {
+        uart_puts("[MLFQ/MLQ] pid ");
+        ml_trace_num(process->pid);
+        uart_puts(" parte al livello ");
+        ml_trace_num(start_level);
+        uart_puts("\n");
+    }
+
     // If the process is initialized in a READY (runnable) state...
     if (process->state == PROCESS_READY) {
         // ...enqueue it into the ready queues using the routing function
@@ -316,6 +343,14 @@ int sched_set_param(struct PCB* process, int param, long value) {
             // one last time, and re-enqueued at the new level afterwards
             queue_level[process->pid] = value;
             preempt_enable();
+            // Trace: explicit level change requested through the API
+            if (ML_TRACE && active_algorithm->ml_policy) {
+                uart_puts("[MLFQ/MLQ] pid ");
+                ml_trace_num(process->pid);
+                uart_puts(" spostato al livello ");
+                ml_trace_num(value);
+                uart_puts("\n");
+            }
             return 0;
         }
     }
@@ -711,6 +746,8 @@ static void _multilevel_on_tick() {
             }
             // Reset the boost timer
             ml_ticks_since_boost = 0;
+            // Trace: everyone is back at the top queue (anti-starvation)
+            if (ML_TRACE) uart_puts("[MLFQ] BOOST: tutti al livello 0\n");
         }
     }
 
@@ -727,6 +764,14 @@ static void _multilevel_on_tick() {
         // Demote it to the next lower queue level (the re-enqueue at the new
         // level happens in _schedule_multilevel, called right after this tick)
         queue_level[current_process->pid]++;
+        // Trace: the process consumed its whole quantum and slides down
+        if (ML_TRACE) {
+            uart_puts("[MLFQ] pid ");
+            ml_trace_num(current_process->pid);
+            uart_puts(" demotion al livello ");
+            ml_trace_num(queue_level[current_process->pid]);
+            uart_puts("\n");
+        }
     }
 }
 

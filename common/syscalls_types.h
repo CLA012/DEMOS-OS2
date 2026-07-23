@@ -26,6 +26,7 @@
 #define SYSCALL_WRITE_HEX_NUMBER 18
 #define SYSCALL_GET_TIME_NUMBER 19
 #define SYSCALL_SET_SCHED_PARAM_NUMBER 20
+#define SYSCALL_GET_PID_NUMBER 21
 
 // The maximum size of each argument passed to the exec systemcall
 #define SYSCALL_EXEC_ARGUMENT_DIMENSION 64

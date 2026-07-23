@@ -342,6 +342,14 @@ int syscall_set_sched_param(int pid, int param, int value) {
   return sched_set_param(destination_process, param, value);
 }
 
+// SYSCALL GET PID
+// Returns the pid of the calling process (like POSIX getpid); it is used by
+// the test programs so that a parent can pass its own pid to the children
+// before the fork, enabling child-to-parent IPC
+int syscall_get_pid() {
+  return current_process->pid;
+}
+
 unsigned long syscall_get_time() {
   // Indirizzo base del registro TIMER_CLO su Raspberry Pi 3
   // Restituisce i microsecondi trascorsi dall'avvio
@@ -418,6 +426,9 @@ void syscall_dispatcher(unsigned long* registers) {
       break;
     case SYSCALL_SET_SCHED_PARAM_NUMBER:
       registers[0] = syscall_set_sched_param((int)registers[0], (int)registers[1], (int)registers[2]);
+      break;
+    case SYSCALL_GET_PID_NUMBER:
+      registers[0] = syscall_get_pid();
       break;
   }
 }

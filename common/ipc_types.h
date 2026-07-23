@@ -11,4 +11,8 @@
 #define SIGNAL_STOP 2
 #define SIGNAL_RESUME 3
 
+// Maximum size in bytes of a message body: shared between the kernel (PCB
+// message buffer, see scheduler.h) and the user programs that receive messages
+#define MAX_MESSAGES_BODY_SIZE 256
+
 #endif

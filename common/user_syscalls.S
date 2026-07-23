@@ -130,6 +130,12 @@ call_syscall_set_sched_param:
     svc #0
     ret
 
+.globl call_syscall_get_pid
+call_syscall_get_pid:
+    mov w8, #SYSCALL_GET_PID_NUMBER
+    svc #0
+    ret
+
 thread_start:
     mov x29, 0
     mov x0, x11
