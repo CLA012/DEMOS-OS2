@@ -915,10 +915,13 @@ void handle_timer_tick() {
     // Safety catch: ensure the time slice doesn't go negative
     current_process->counter = 0;
 
-    // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
-    // current process keeps the CPU until it blocks, yields or exits, so the
-    // dispatcher must not even be called here
-    if (!active_algorithm->is_preemptive) return;
+    // Non-preemptive algorithms (FCFS, SJF) never preempt a USER process on a
+    // timer tick: it keeps the CPU until it blocks, yields or exits. The idle
+    // init process is the exception: it runs only when nobody else is runnable
+    // and never blocks nor yields by itself, so without this check the CPU
+    // would stay on idle forever once every process is asleep (e.g. the shell
+    // waiting for input would never be dispatched again)
+    if (!active_algorithm->is_preemptive && current_process != &init_process) return;
 
     // Re-enable hardware interrupts before calling the scheduler
     enable_irq();
