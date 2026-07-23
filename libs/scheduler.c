@@ -64,7 +64,7 @@ static const MultilevelPolicy ml_policy_mlfq = {
     .n_levels = 5,
     .quantum = {5, 8, 10, 15, 20},
     .demote_on_expiry = 1,
-    .boost_period = 1000,
+    .boost_period = MLFQ_BOOST_PERIOD,
 };
 
 // =========================================================================

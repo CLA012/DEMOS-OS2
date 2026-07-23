@@ -148,6 +148,12 @@ struct PCB {
 // =========================================================================
 // MULTILEVEL QUEUE POLICY
 // =========================================================================
+// Anti-starvation boost period of the MLFQ policy, in timer ticks: with the
+// 10 ms system tick (TIMER_PERIOD in drivers/timer/timer.h) 300 ticks are 3
+// seconds, the order of magnitude OSTEP suggests for the period S of Rule 5
+// ("after some time period S, move all the jobs to the topmost queue")
+#define MLFQ_BOOST_PERIOD 300
+
 // MLQ and MLFQ share a single implementation: an array of priority queues, one
 // queue per priority level, scanned from level 0 (highest priority) downwards.
 // Every process carries in queue_priority the level of the queue it belongs to.
