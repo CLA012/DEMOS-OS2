@@ -1,5 +1,6 @@
 #include "../user/user.h"
 #include "../common/user_syscalls.h"
+#include "../common/process_api.h"
 #include <stddef.h>
 
 // How many programs do we want to launch in parallel?
@@ -10,36 +11,19 @@ void main() {
 
     call_syscall_write("[RUN_ALL] Starting multiple load test...\n");
 
-    // Process creation loop
+    // Process creation loop: one spawn_process call creates each benchmark
+    // with its own scheduling parameters (see common/process_api.h). Each
+    // child gets a different static priority (used by priority aging), a
+    // different number of lottery tickets (its expected CPU share) and a
+    // different multilevel queue level (0 = highest priority queue)
     for (int i = 0; i < NUM_PROCESSES; i++) {
-        int pid = call_syscall_fork();
+        int pid = spawn_process("/bin/benchmark.bin", i + 1, (i + 1) * 10, i);
 
-        if (pid == 0) {
-            // ==========================================
-            // CHILD PROCESS
-            // ==========================================
-            int error = call_syscall_exec("/bin/benchmark.bin", 0, NULL);
-            
-            if (error) {
-                call_syscall_write("[RUN_ALL] Error: unable to start the binary!\n");
-                call_syscall_exit();
-            }
+        if (pid < 0) {
+            call_syscall_write("[RUN_ALL] Error: unable to start the binary!\n");
         } else {
-            // ==========================================
-            // PARENT PROCESS
-            // ==========================================
             // Save the PID of the newly created child in the array
             pids[i] = pid;
-
-            // Children are born all equal (they inherit the parent's scheduling
-            // parameters): the parent differentiates them AFTER the fork, like
-            // the POSIX nice()/setpriority() scheme. Each benchmark gets a
-            // different static priority (used by priority aging), a different
-            // number of lottery tickets (its expected CPU share) and a
-            // different multilevel queue level (0 = highest priority queue)
-            call_syscall_set_sched_param(pid, SCHED_PARAM_PRIORITY, i + 1);
-            call_syscall_set_sched_param(pid, SCHED_PARAM_TICKETS, (i + 1) * 10);
-            call_syscall_set_sched_param(pid, SCHED_PARAM_QUEUE_PRIORITY, i);
         }
     }
 
