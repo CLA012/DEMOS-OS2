@@ -2,22 +2,22 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Dimostrazione MLFQ (eseguire con active_algorithm = &sched_mlfq).
-// Va letta insieme alle tracce [MLFQ] stampate dal kernel (ML_TRACE):
-// - figlio A: CPU-bound dal livello 0 -> demotion a catena verso il fondo
-//   (Rule 4a di OSTEP: chi consuma l'intero quanto scende di livello)
-// - figlio B: "interattivo" (burst brevi + yield prima di esaurire il quanto)
-//   -> nessuna demotion, resta al livello 0
-// - figlio C: CPU-bound spostato al livello 3 prima di partire -> le sue
-//   demotion partono dal livello della SUA priorita' (3 -> 4)
-// - ogni 3 secondi la traccia BOOST mostra il ritorno di tutti al livello 0
-//   (Rule 5 di OSTEP, anti-starvation)
+// MLFQ demonstration (run with active_algorithm = &sched_mlfq).
+// To be read together with the [MLFQ] traces printed by the kernel (ML_TRACE):
+// - child A: CPU-bound from level 0 -> chain of demotions towards the bottom
+//   (OSTEP Rule 4a: whoever consumes the whole quantum moves down a level)
+// - child B: "interactive" (short bursts + yield before exhausting the
+//   quantum) -> no demotion, it stays at level 0
+// - child C: CPU-bound moved to level 3 before starting -> its demotions
+//   start from the level of ITS OWN priority (3 -> 4)
+// - every 3 seconds the BOOST trace shows everybody going back to level 0
+//   (OSTEP Rule 5, anti-starvation)
 void main() {
   int pids[3];
 
   call_syscall_write("[TEST MLFQ] osservare le tracce [MLFQ] del kernel\n");
 
-  // A: CPU-bound dal livello 0 (demotion a catena)
+  // A: CPU-bound from level 0 (chain of demotions)
   int pid = call_syscall_fork();
   if (pid == 0) {
     burn_cpu_ms(4000);
@@ -26,8 +26,8 @@ void main() {
   }
   pids[0] = pid;
 
-  // B: interattivo, burst sotto il quanto del livello 0 (50 ms) poi yield:
-  // chi non esaurisce il quanto non viene demotato e resta in cima
+  // B: interactive, bursts below the level-0 quantum (50 ms) then yield:
+  // whoever does not exhaust the quantum is not demoted and stays on top
   pid = call_syscall_fork();
   if (pid == 0) {
     unsigned long start = call_syscall_get_time();
@@ -40,7 +40,7 @@ void main() {
   }
   pids[1] = pid;
 
-  // C: CPU-bound, spostato al livello 3 prima del via (barriera IPC)
+  // C: CPU-bound, moved to level 3 before the go (IPC barrier)
   pid = call_syscall_fork();
   if (pid == 0) {
     char go[MAX_MESSAGES_BODY_SIZE];

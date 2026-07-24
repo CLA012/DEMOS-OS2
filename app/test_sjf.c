@@ -2,13 +2,13 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test SJF (eseguire con active_algorithm = &sched_sjf).
-// Due figli con burst di CPU molto diversi (20 ms vs 300 ms) separati da
-// blocchi in ricezione: ad ogni blocco la stima est_burst viene aggiornata
-// con la media esponenziale (tau = 0.5*t + 0.5*tau), quindi dopo i primi
-// round lo scheduler HA IMPARATO le durate. A ogni via simultaneo del padre,
-// il figlio col burst corto deve essere servito per primo: il suo DONE deve
-// arrivare prima di quello del burst lungo.
+// SJF test (run with active_algorithm = &sched_sjf).
+// Two children with very different CPU bursts (20 ms vs 300 ms) separated by
+// blocking receives: at every block the est_burst estimate is updated with
+// the exponential average (tau = 0.5*t + 0.5*tau), so after the first rounds
+// the scheduler HAS LEARNED the durations. At every simultaneous go from the
+// parent, the child with the short burst must be served first: its DONE must
+// arrive before the long burst's one.
 #define ROUNDS 4
 
 void main() {
@@ -24,7 +24,7 @@ void main() {
     if (pid == 0) {
       for (int r = 0; r < ROUNDS; r++) {
         char go[MAX_MESSAGES_BODY_SIZE];
-        // Il blocco in ricezione chiude il burst e aggiorna est_burst
+        // The blocking receive closes the burst and updates est_burst
         call_syscall_receive_message(go);
         burn_cpu_ms(my_burst);
         char body[24];
@@ -38,7 +38,7 @@ void main() {
 
   int last_first = 0;
   for (int r = 0; r < ROUNDS; r++) {
-    // Via simultaneo: entrambi i figli diventano pronti insieme
+    // Simultaneous go: both children become ready together
     call_syscall_send_message(pids[0], "GO");
     call_syscall_send_message(pids[1], "GO");
 

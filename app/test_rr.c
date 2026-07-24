@@ -2,11 +2,11 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test Round Robin (eseguire con active_algorithm = &sched_round_robin).
-// Due figli CPU-bound stampano un marcatore ogni ~150 ms di CPU consumata:
-// con il quanto di 10 tick (100 ms) la preemption li alterna, quindi i
-// marcatori [A] e [B] devono risultare mescolati. Per confronto, con FCFS
-// attivo uscirebbero prima tutti gli [A] e poi tutti i [B].
+// Round Robin test (run with active_algorithm = &sched_round_robin).
+// Two CPU-bound children print a marker every ~150 ms of consumed CPU: with
+// the 10-tick quantum (100 ms) preemption alternates them, so the [A] and [B]
+// markers must come out interleaved. For comparison, with FCFS active all the
+// [A]s would come out first, then all the [B]s.
 void main() {
   call_syscall_write("[TEST RR] due figli CPU-bound: attesi [A] e [B] alternati\n");
 

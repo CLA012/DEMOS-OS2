@@ -351,8 +351,8 @@ int syscall_get_pid() {
 }
 
 unsigned long syscall_get_time() {
-  // Indirizzo base del registro TIMER_CLO su Raspberry Pi 3
-  // Restituisce i microsecondi trascorsi dall'avvio
+  // Base address of the TIMER_CLO register on Raspberry Pi 3
+  // Returns the microseconds elapsed since boot
   return mmio_read(0x00003004);
 }
 

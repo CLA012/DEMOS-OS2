@@ -2,13 +2,13 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test priority aging (eseguire con active_algorithm = &sched_priority_aging).
-// Due figli CPU-bound IDENTICI (2 secondi di lavoro), ma con priorita'
-// statiche 1 e 4: la ricarica d'epoca counter = counter/2 + priority da' al
-// secondo circa 4 volte piu' CPU, quindi deve completare per primo.
-// Anti-starvation: anche il figlio a priorita' 1 avanza comunque e completa.
-// I figli partono insieme grazie a una barriera IPC: prima si bloccano in
-// ricezione, il padre imposta le priorita' e poi manda il via a entrambi.
+// Priority aging test (run with active_algorithm = &sched_priority_aging).
+// Two IDENTICAL CPU-bound children (2 seconds of work), but with static
+// priorities 1 and 4: the epoch recharge counter = counter/2 + priority gives
+// the second one about 4 times more CPU, so it must complete first.
+// Anti-starvation: the priority-1 child still makes progress and completes.
+// The children start together thanks to an IPC barrier: first they block in
+// receive, the parent sets the priorities and then sends the go to both.
 void main() {
   int parent_pid = call_syscall_get_pid();
   int pids[2];
@@ -18,8 +18,8 @@ void main() {
     int pid = call_syscall_fork();
     if (pid == 0) {
       char go[MAX_MESSAGES_BODY_SIZE];
-      // Barriera: il figlio aspetta il via, cosi' il padre fa in tempo a
-      // impostare la priorita' prima che il lavoro cominci
+      // Barrier: the child waits for the go, so the parent has the time to
+      // set the priority before the work begins
       call_syscall_receive_message(go);
       burn_cpu_ms(2000);
       char body[24];

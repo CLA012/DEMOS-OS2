@@ -2,20 +2,20 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test MLQ (eseguire con active_algorithm = &sched_mlq).
-// Due figli CPU-bound identici in code di priorita' diverse: livello 0
-// (massima) e livello 3. A priorita' FISSE, il livello 3 gira solo quando la
-// coda di livello 0 e' vuota: il figlio a livello 0 deve completare per primo,
-// anche se quello a livello 3 e' stato creato e svegliato prima di lui.
-// Le tracce [MLFQ/MLQ] del kernel mostrano ogni processo nella coda della
-// sua priorita'.
+// MLQ test (run with active_algorithm = &sched_mlq).
+// Two identical CPU-bound children in queues of different priority: level 0
+// (highest) and level 3. With FIXED priorities, level 3 runs only when the
+// level-0 queue is empty: the level-0 child must complete first, even though
+// the level-3 one was created and woken up before it.
+// The kernel [MLFQ/MLQ] traces show every process in the queue of its own
+// priority.
 void main() {
   int parent_pid = call_syscall_get_pid();
   int pids[2];
 
   for (int i = 0; i < 2; i++) {
-    // Il primo figlio creato va al livello 3, il secondo al livello 0: se
-    // vincesse l'ordine di creazione (e non la priorita') il test fallirebbe
+    // The first created child goes to level 3, the second to level 0: if the
+    // creation order won (and not the priority) the test would fail
     int my_level = (i == 0) ? 3 : 0;
     int pid = call_syscall_fork();
     if (pid == 0) {
@@ -35,7 +35,7 @@ void main() {
   }
 
   call_syscall_write("[TEST MLQ] livello 0 contro livello 3 (creato prima il 3)\n");
-  // Il figlio a livello 3 riceve il via per primo: partira' comunque secondo
+  // The level-3 child receives the go first: it will still start second
   call_syscall_send_message(pids[0], "GO");
   call_syscall_send_message(pids[1], "GO");
 

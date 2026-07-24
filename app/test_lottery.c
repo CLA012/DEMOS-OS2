@@ -2,12 +2,12 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test lottery (eseguire con active_algorithm = &sched_lottery).
-// Tre figli con 10, 20 e 40 biglietti contano iterazioni di lavoro nella
-// stessa finestra di 3 secondi: la quota di CPU attesa e' proporzionale ai
-// biglietti (1 : 2 : 4), quindi i conteggi devono crescere coi biglietti.
-// Il controllo e' statistico: si verifica l'ordinamento, non il rapporto
-// esatto (i valori stampati permettono di apprezzare le proporzioni).
+// Lottery test (run with active_algorithm = &sched_lottery).
+// Three children with 10, 20 and 40 tickets count work iterations within the
+// same 3-second window: the expected CPU share is proportional to the tickets
+// (1 : 2 : 4), so the counts must grow with the tickets.
+// The check is statistical: it verifies the ordering, not the exact ratio
+// (the printed values let you appreciate the proportions).
 void main() {
   int parent_pid = call_syscall_get_pid();
   int pids[3];
@@ -17,7 +17,7 @@ void main() {
     int pid = call_syscall_fork();
     if (pid == 0) {
       char go[MAX_MESSAGES_BODY_SIZE];
-      // Barriera: si parte tutti insieme, a biglietti gia' assegnati
+      // Barrier: everybody starts together, with tickets already assigned
       call_syscall_receive_message(go);
       unsigned long start = call_syscall_get_time();
       unsigned long count = 0;
@@ -26,7 +26,7 @@ void main() {
         for (int k = 0; k < 1000; k++) sink += k;
         count++;
       }
-      // Il corpo del messaggio e' "<id>:<conteggio>"
+      // The message body is "<id>:<count>"
       char body[32];
       body[0] = (char)('0' + my_id);
       body[1] = ':';
@@ -35,7 +35,7 @@ void main() {
       call_syscall_exit();
     }
     pids[i] = pid;
-    // Biglietti 10, 20, 40: quote attese 1/7, 2/7, 4/7
+    // Tickets 10, 20, 40: expected shares 1/7, 2/7, 4/7
     call_syscall_set_sched_param(pid, SCHED_PARAM_TICKETS, my_id == 3 ? 40 : my_id * 10);
   }
 

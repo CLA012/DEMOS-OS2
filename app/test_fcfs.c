@@ -2,12 +2,12 @@
 #include "../common/testlib.h"
 #include <stddef.h>
 
-// Test FCFS (eseguire con active_algorithm = &sched_fcfs).
-// Tre figli CPU-bound creati nell'ordine 1, 2, 3: essendo l'algoritmo
-// non-preemptive, ognuno deve girare PER INTERO prima del successivo, e
-// l'ordine di completamento deve coincidere con l'ordine di creazione.
-// Ogni figlio notifica il proprio id al padre via IPC alla fine del lavoro:
-// il padre verifica che gli id arrivino nell'ordine 1, 2, 3.
+// FCFS test (run with active_algorithm = &sched_fcfs).
+// Three CPU-bound children created in the order 1, 2, 3: since the algorithm
+// is non-preemptive, each one must run TO COMPLETION before the next, and the
+// completion order must match the creation order.
+// Each child notifies its id to the parent via IPC when its work is done:
+// the parent checks that the ids arrive in the order 1, 2, 3.
 #define N_CHILDREN 3
 
 void main() {
@@ -17,7 +17,7 @@ void main() {
   call_syscall_write("[TEST FCFS] 3 figli CPU-bound creati in ordine 1, 2, 3\n");
 
   for (int i = 0; i < N_CHILDREN; i++) {
-    // L'identita' del figlio viene copiata dalla fork insieme alla memoria
+    // The child's identity is copied by the fork together with the memory
     int my_id = i + 1;
     int pid = call_syscall_fork();
     if (pid == 0) {
@@ -36,7 +36,7 @@ void main() {
     pids[i] = pid;
   }
 
-  // Il padre riceve gli END: devono arrivare nell'ordine di creazione
+  // The parent receives the ENDs: they must arrive in creation order
   int pass = 1;
   for (int i = 0; i < N_CHILDREN; i++) {
     char body[MAX_MESSAGES_BODY_SIZE];

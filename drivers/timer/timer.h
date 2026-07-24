@@ -2,12 +2,12 @@
 #define __TIMER_H
 
 /**
- * Driver del System Timer: inizializzazione e gestione interrupt.
- * Offset relativi a MMIO_BASE (0x3F000000 su Raspberry Pi 3).
+ * System Timer driver: initialization and interrupt handling.
+ * Offsets relative to MMIO_BASE (0x3F000000 on Raspberry Pi 3).
  */
 
 // ==============================
-// Registri del timer
+// Timer registers
 // ==============================
 
 #define TIMER_BASE	0x00003000
@@ -23,13 +23,13 @@
 #define TIMER_CS_M1	(1 << 1)
 
 // ==============================
-// Periodo del tick di sistema
+// System tick period
 // ==============================
 
-// Durata di un tick in microsecondi (il System Timer conta a 1 MHz):
-// 10000 us = 10 ms, cioe' 100 tick al secondo. Tutti i quanti di tempo dello
-// scheduler sono espressi in tick, quindi questa costante ne fissa la durata
-// reale (es. quanto Round Robin = 10 tick = 100 ms).
+// Duration of one tick in microseconds (the System Timer counts at 1 MHz):
+// 10000 us = 10 ms, i.e. 100 ticks per second. All the scheduler time quanta
+// are expressed in ticks, so this constant sets their real duration
+// (e.g. Round Robin quantum = 10 ticks = 100 ms).
 #define TIMER_PERIOD 10000 // 10ms
 
 void timer_init(void);

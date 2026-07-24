@@ -2,12 +2,12 @@
 #define __CONTROLLER_H
 
 /**
- * Controller degli interrupt: registri e funzioni di abilitazione/gestione.
- * Offset relativi a MMIO_BASE (0x3F000000 su Raspberry Pi 3).
+ * Interrupt controller: registers and enable/handling functions.
+ * Offsets relative to MMIO_BASE (0x3F000000 on Raspberry Pi 3).
  */
 
 // ==============================
-// Registri del controller IRQ
+// IRQ controller registers
 // ==============================
 
 #define IRQ_BASIC_PENDING	0x0000B200
@@ -22,7 +22,7 @@
 #define DISABLE_BASIC_IRQS	0x0000B224
 
 // ==============================
-// Bit utili
+// Useful bits
 // ==============================
 
 #define SYSTEM_TIMER_IRQ_0	(1 << 0)
