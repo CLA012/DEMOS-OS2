@@ -918,7 +918,7 @@ void handle_timer_tick() {
     // Non-preemptive algorithms (FCFS, SJF) never switch on a timer tick: the
     // current process keeps the CPU until it blocks, yields or exits, so the
     // dispatcher must not even be called here
-    if (!active_algorithm->is_preemptive) return;
+    if (!active_algorithm->is_preemptive) && current_process != &init_process) return;
 
     // Re-enable hardware interrupts before calling the scheduler
     enable_irq();

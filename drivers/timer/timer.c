@@ -13,7 +13,10 @@ void timer_init(void) {
 
 void handle_timer_irq(void) {
   mmio_write(TIMER_CS, TIMER_CS_M1);
-  curVal += TIMER_PERIOD;
+
+
+  curVal = mmio_read(TIMER_CLO) + TIMER_PERIOD;
   mmio_write(TIMER_C1, curVal);
   handle_timer_tick();
+  
 }
